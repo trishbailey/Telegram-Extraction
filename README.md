@@ -6,24 +6,28 @@ Multiple users can run collections at the same time. Every browser session keeps
 
 ## Output
 
-Each run produces a zip file containing:
+Each run produces one Excel file, `<prefix>_<date>.xlsx`, with one sheet and one row per post. Every column describes that post.
 
-| File | Contents |
+| Column | Contents |
 |---|---|
-| `<prefix>_workbook.xlsx` | Excel workbook with one sheet per table below. Post text is wrapped and readable in the cell. |
-| `<prefix>_keyword_posts.csv` | Every post that matched a search keyword, across all channels |
-| `posts_by_channel/<prefix>_<channel>.csv` | The same posts, split into one file per channel |
-| `<prefix>_forwarding_network.csv` | Matched posts that were forwards, with the original source and dates |
-| `<prefix>_channel_mentions.csv` | @handles and t.me links found in matched posts |
-| `<prefix>_urls.csv` | External URLs and domains found in matched posts |
-| `<prefix>_cascades.csv` | Near-identical posts that appeared in two or more channels, with the delay in hours from first appearance |
-| `<prefix>_full_scan_hits.csv` | Posts containing a full-scan keyword (only when full-scan keywords are used) |
+| channel, date, text, link | Where and when the post appeared, its full text and a direct link |
+| views, forwards, replies | Engagement counts at collection time |
+| is_forward, forwarded_from, original_fwd_date | Whether the post was forwarded, from which account or channel, and when the original was posted |
+| found_by | `keyword search`, `full scan` or `both` |
+| search_term | The search keyword that surfaced the post |
+| matched_keywords | Search keywords that appear word for word in the text |
+| full_scan_keywords | Full-scan keywords that appear in the text |
+| mentioned_channels | @handles and t.me links in the text |
+| domains, urls | Linked websites, and the full links (one per line) |
+| cascade_id | A shared number for posts with near-identical text in two or more channels |
+| cascade_channel_count | How many channels carried that text |
+| cascade_first_channel, cascade_first_date | Where and when that text appeared first |
+| hours_after_first | Hours between the first appearance and this post |
+| media_type, channel_title, message_id, edit_date, post_author, reply_to_msg_id, grouped_id | Post metadata. `grouped_id` links posts sent together as an album. |
 
-Files with no rows are left out of the zip. The workbook can also be downloaded on its own.
+The header row and the first three columns stay in place while scrolling, and every column has a filter. Filter `channel` to see one channel's posts, or filter `cascade_id` to see one piece of content across channels. For ranked counts, such as the most-mentioned channels or most-linked domains, use a pivot table or the result tabs in the app.
 
-CSV files are saved as UTF-8 with a byte-order mark so Excel displays emoji and non-Latin scripts correctly. Post text keeps its original line breaks. In the CSV files, Excel shows only the first line of each post until you turn on **Wrap Text** for the `text` column. The workbook has wrapping turned on already.
-
-Each post record includes: channel, date, text, link, views, forwards, replies, forward status and source, original forward date, the search term that surfaced the post, matched keywords, media type, channel title, message ID, edit date, post author, reply-to message ID and album ID. Media files are not downloaded.
+Media files are not downloaded. Excel cells hold up to 32,767 characters, so longer text is cut at that length.
 
 ## Files in this repository
 
@@ -82,7 +86,7 @@ The script also runs in Google Colab: paste its contents into a cell, add `!pip 
    - **Max characters per message:** 0 keeps the full text.
    - **File name prefix:** added to every output file.
 3. **Run.** Click **Start collection**. The progress bar and log update every two seconds. **Cancel collection** stops the run.
-4. **Download.** When the run finishes, review the result tabs and click **Download everything (.zip)** or **Download Excel workbook (.xlsx)**. Download promptly: results exist only in the browser session and disappear if the app restarts or you disconnect.
+4. **Download.** When the run finishes, review the result tabs and click **Download results (.xlsx)**. Download promptly: results exist only in the browser session and disappear if the app restarts or you disconnect.
 5. **Disconnect** from the sidebar when finished.
 
 ## Operating notes

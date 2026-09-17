@@ -13,7 +13,6 @@ import re
 import threading
 import time
 import uuid
-import zipfile
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -275,7 +274,7 @@ async def _collect(runner, key, client, cfg, progress, log):
                     matched = [t for t in cfg["scan_terms"] if t.lower() in lower]
                     if matched:
                         row = await to_row(msg, channel, username, title, None)
-                        row["matched_keywords"] = ", ".join(matched)
+                        row["full_scan_keywords"] = ", ".join(matched)
                         scan_hits.append(row)
                         hits += 1
                 log(f"  {hits} full-scan matches")
@@ -287,7 +286,7 @@ async def _collect(runner, key, client, cfg, progress, log):
         await asyncio.sleep(2)
 
     log(f"Finished: {len(messages)} keyword matches, {len(scan_hits)} full-scan matches")
-    return build_outputs(messages, scan_hits, cfg["min_cascade_chars"])
+    return build_posts(messages, scan_hits, cfg["min_cascade_chars"])
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -297,111 +296,88 @@ AT_RE = re.compile(r"(?<!\w)@([A-Za-z0-9_]{5,})")
 TG_RE = re.compile(r"https?://(?:t\.me|telegram\.me)/(?:s/)?([A-Za-z0-9_]{5,})", re.I)
 URL_RE = re.compile(r"(https?://[^\s<>\"]+)")
 
+POST_COLUMNS = [
+    "channel", "date", "text", "link", "views", "forwards", "replies",
+    "is_forward", "forwarded_from", "original_fwd_date",
+    "found_by", "search_term", "matched_keywords", "full_scan_keywords",
+    "mentioned_channels", "domains", "urls",
+    "cascade_id", "cascade_channel_count", "cascade_first_channel",
+    "cascade_first_date", "hours_after_first",
+    "media_type", "channel_title", "message_id", "edit_date", "post_author",
+    "reply_to_msg_id", "grouped_id",
+]
+
 
 def normalize_text(text):
     return re.sub(r"\s+", " ", (text or "")[:200].lower().strip())
 
 
-POST_COLUMNS = [
-    "channel", "date", "text", "link", "views", "forwards", "replies",
-    "is_forward", "forwarded_from", "original_fwd_date", "search_term",
-    "matched_keywords", "media_type", "channel_title", "message_id",
-    "edit_date", "post_author", "reply_to_msg_id", "grouped_id",
-]
+def unique_in_order(items):
+    return list(dict.fromkeys(items))
 
 
-def order_posts(df):
-    if df.empty:
-        return df
-    return df[[c for c in POST_COLUMNS if c in df.columns]
-              + [c for c in df.columns if c not in POST_COLUMNS]]
-
-
-def build_outputs(messages, scan_hits, min_cascade_chars):
-    df = order_posts(pd.DataFrame(messages))
-    out = {"messages": df, "full_scan_hits": order_posts(pd.DataFrame(scan_hits))}
-
-    if df.empty:
-        for name in ("forwarding_network", "channel_mentions", "urls", "cascades"):
-            out[name] = pd.DataFrame()
-        return out
-
-    out["forwarding_network"] = df[df["is_forward"]][
-        ["channel", "forwarded_from", "date", "original_fwd_date", "views", "forwards", "link"]
-    ].reset_index(drop=True)
-
-    mentions, urls = [], []
+def build_posts(messages, scan_hits, min_cascade_chars):
+    """Merge keyword and full-scan results into one row per post, with derived columns."""
+    posts = {}
     for m in messages:
-        text = m["text"] or ""
-        for handle in set(AT_RE.findall(text)) | set(TG_RE.findall(text)):
-            mentions.append({"source_channel": m["channel"], "mentioned_channel": f"@{handle}",
-                             "message_id": m["message_id"], "message_date": m["date"],
-                             "link": m["link"], "text_snippet": text[:300]})
-        for url in set(URL_RE.findall(text)):
+        row = dict(m, found_by="keyword search", full_scan_keywords="")
+        posts[(row["channel"], row["message_id"])] = row
+    for h in scan_hits:
+        k = (h["channel"], h["message_id"])
+        if k in posts:
+            posts[k]["found_by"] = "both"
+            posts[k]["full_scan_keywords"] = h["full_scan_keywords"]
+        else:
+            posts[k] = dict(h, found_by="full scan")
+    rows = list(posts.values())
+    if not rows:
+        return pd.DataFrame(columns=POST_COLUMNS)
+
+    for r in rows:
+        text = r["text"] or ""
+        handles = unique_in_order(AT_RE.findall(text) + TG_RE.findall(text))
+        urls = unique_in_order(URL_RE.findall(text))
+        domains = []
+        for u in urls:
             try:
-                domain = urlparse(url).netloc
+                domains.append(urlparse(u).netloc)
             except Exception:
-                domain = "unknown"
-            urls.append({"source_channel": m["channel"], "full_url": url, "domain": domain,
-                         "message_id": m["message_id"], "message_date": m["date"],
-                         "link": m["link"]})
-    out["channel_mentions"] = pd.DataFrame(mentions)
-    out["urls"] = pd.DataFrame(urls)
+                pass
+        r["mentioned_channels"] = ", ".join(f"@{h}" for h in handles)
+        r["urls"] = "\n".join(urls)
+        r["domains"] = ", ".join(unique_in_order(d for d in domains if d))
+        r.update(cascade_id=None, cascade_channel_count=None, cascade_first_channel=None,
+                 cascade_first_date=None, hours_after_first=None)
 
     groups = defaultdict(list)
-    for m in messages:
-        k = normalize_text(m["text"])
-        if len(k) > min_cascade_chars:
-            groups[k].append(m)
+    for r in rows:
+        key = normalize_text(r["text"])
+        if len(key) > min_cascade_chars:
+            groups[key].append(r)
+    cascades = [sorted(g, key=lambda r: r["date"]) for g in groups.values()
+                if len({r["channel"] for r in g}) >= 2]
+    cascades.sort(key=lambda g: (-len({r["channel"] for r in g}), g[0]["date"]))
+    for cid, group in enumerate(cascades, start=1):
+        first = group[0]
+        first_dt = datetime.fromisoformat(first["date"])
+        n = len({r["channel"] for r in group})
+        for r in group:
+            r.update(
+                cascade_id=cid, cascade_channel_count=n,
+                cascade_first_channel=first["channel"], cascade_first_date=first["date"],
+                hours_after_first=round(
+                    (datetime.fromisoformat(r["date"]) - first_dt).total_seconds() / 3600, 2),
+            )
 
-    cascades = []
-    for msgs in groups.values():
-        if len({m["channel"] for m in msgs}) < 2:
-            continue
-        msgs = sorted(msgs, key=lambda m: m["date"])
-        cascades.append(msgs)
-    cascades.sort(key=lambda ms: len({m["channel"] for m in ms}), reverse=True)
-
-    rows = []
-    for i, msgs in enumerate(cascades, start=1):
-        first_dt = datetime.fromisoformat(msgs[0]["date"])
-        n_channels = len({m["channel"] for m in msgs})
-        for m in msgs:
-            rows.append({
-                "cascade_id": i,
-                "channels_count": n_channels,
-                "origin_channel": msgs[0]["channel"],
-                "forwarded_from": msgs[0]["forwarded_from"],
-                "channel": m["channel"],
-                "date": m["date"],
-                "delay_hours": round((datetime.fromisoformat(m["date"]) - first_dt)
-                                     .total_seconds() / 3600, 2),
-                "views": m["views"],
-                "link": m["link"],
-                "text_snippet": msgs[0]["text"][:300],
-            })
-    out["cascades"] = pd.DataFrame(rows)
-    return out
+    df = pd.DataFrame(rows).sort_values(["channel", "date"], ascending=[True, False])
+    return df[[c for c in POST_COLUMNS if c in df.columns]].reset_index(drop=True)
 
 
-SHEET_NAMES = {
-    "messages": "Posts",
-    "full_scan_hits": "Full-scan hits",
-    "forwarding_network": "Forwarding",
-    "cascades": "Cascades",
-    "channel_mentions": "Mentions",
-    "urls": "URLs",
-}
-WRAP_COLUMNS = {"text", "text_snippet"}
+WRAP_WIDTHS = {"text": 90, "urls": 50}
 EXCEL_CELL_LIMIT = 32767
 
 
-def csv_bytes(df):
-    # utf-8-sig adds the byte-order mark Excel needs to read emoji and Cyrillic correctly
-    return df.to_csv(index=False).encode("utf-8-sig")
-
-
-def xlsx_bytes(outputs):
+def xlsx_bytes(df):
     def clean(v):
         if isinstance(v, str):
             return ILLEGAL_CHARACTERS_RE.sub("", v)[:EXCEL_CELL_LIMIT]
@@ -411,45 +387,26 @@ def xlsx_bytes(outputs):
     head_font = Font(name="Arial", size=10, bold=True)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        for name, sheet in SHEET_NAMES.items():
-            df = outputs.get(name)
-            if df is None or df.empty:
-                continue
-            df.map(clean).to_excel(xw, sheet_name=sheet, index=False)
-            ws = xw.sheets[sheet]
-            ws.freeze_panes = "A2"
-            ws.auto_filter.ref = ws.dimensions
-            wrap_letters = set()
-            for cell in ws[1]:
-                cell.font = head_font
-                header = str(cell.value)
-                if header in WRAP_COLUMNS:
-                    wrap_letters.add(cell.column_letter)
-                    ws.column_dimensions[cell.column_letter].width = 90
-                else:
-                    ws.column_dimensions[cell.column_letter].width = min(max(len(header) + 4, 12), 30)
-            for row in ws.iter_rows(min_row=2):
-                for cell in row:
-                    cell.font = base_font
-                    cell.alignment = Alignment(vertical="top",
-                                               wrap_text=cell.column_letter in wrap_letters)
-                if wrap_letters:
-                    ws.row_dimensions[row[0].row].height = 150
-    return buf.getvalue()
-
-
-def zip_outputs(outputs, prefix):
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{prefix}_workbook.xlsx", xlsx_bytes(outputs))
-        for name, df in outputs.items():
-            if df.empty:
-                continue
-            if name == "messages":
-                name = "keyword_posts"
-                for channel, part in df.groupby("channel"):
-                    zf.writestr(f"posts_by_channel/{prefix}_{channel}.csv", csv_bytes(part))
-            zf.writestr(f"{prefix}_{name}.csv", csv_bytes(df))
+        df.map(clean).to_excel(xw, sheet_name="Posts", index=False)
+        ws = xw.sheets["Posts"]
+        ws.freeze_panes = "D2"
+        ws.auto_filter.ref = ws.dimensions
+        wrap_letters = set()
+        for cell in ws[1]:
+            cell.font = head_font
+            header = str(cell.value)
+            if header in WRAP_WIDTHS:
+                wrap_letters.add(cell.column_letter)
+                width = WRAP_WIDTHS[header]
+            else:
+                width = min(max(len(header) + 4, 12), 30)
+            ws.column_dimensions[cell.column_letter].width = width
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.font = base_font
+                cell.alignment = Alignment(vertical="top",
+                                           wrap_text=cell.column_letter in wrap_letters)
+            ws.row_dimensions[row[0].row].height = 150
     return buf.getvalue()
 
 
@@ -648,65 +605,62 @@ if ss.job:
     job_panel()
 
 if ss.results:
-    data = ss.results["data"]
-    msgs = data["messages"]
+    posts = ss.results["data"]
     st.subheader("Results")
-    b1, b2 = st.columns(2)
-    stamp = f"{ss.results['prefix']}_{date.today():%Y%m%d}"
-    b1.download_button("Download everything (.zip)",
-                       zip_outputs(data, ss.results["prefix"]),
-                       file_name=f"{stamp}.zip", mime="application/zip", type="primary")
-    b2.download_button("Download Excel workbook (.xlsx)",
-                       xlsx_bytes(data), file_name=f"{stamp}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("Download results (.xlsx)",
+                       xlsx_bytes(posts),
+                       file_name=f"{ss.results['prefix']}_{date.today():%Y%m%d}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       type="primary")
     if ss.results["skipped"]:
         st.warning("Skipped or partially collected: " + ", ".join(ss.results["skipped"]))
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    n_fwd = int(msgs["is_forward"].sum()) if not msgs.empty else 0
-    m1.metric("Keyword matches", len(msgs))
-    m2.metric("Forwards", n_fwd)
-    m3.metric("Original posts", len(msgs) - n_fwd)
-    m4.metric("Cascades", data["cascades"]["cascade_id"].nunique()
-              if not data["cascades"].empty else 0)
-    m5.metric("Full-scan matches", len(data["full_scan_hits"]))
+    if posts.empty:
+        st.info("No posts matched. Check the keywords, channels and date range.")
+    else:
+        n_fwd = int(posts["is_forward"].sum())
+        n_cas = int(posts["cascade_id"].nunique())
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Posts", len(posts))
+        m2.metric("Forwards", n_fwd)
+        m3.metric("Original posts", len(posts) - n_fwd)
+        m4.metric("Cascades", n_cas)
 
-    tabs = st.tabs(["Posts", "Per channel", "Forward sources", "Cascades",
-                    "Mentions", "Domains", "Full-scan hits", "Run log"])
-    with tabs[0]:
-        st.dataframe(msgs, use_container_width=True)
-    with tabs[1]:
-        if not msgs.empty:
-            per = (msgs.groupby("channel")
-                   .agg(total=("message_id", "size"), forwards=("is_forward", "sum"))
-                   .assign(original=lambda d: d.total - d.forwards)
-                   .sort_values("total", ascending=False))
-            st.dataframe(per, use_container_width=True)
-    with tabs[2]:
-        fn = data["forwarding_network"]
-        if not fn.empty:
-            st.dataframe(fn["forwarded_from"].value_counts().rename("count"),
-                         use_container_width=True)
-    with tabs[3]:
-        cas = data["cascades"]
-        if not cas.empty:
-            firsts = cas.groupby("cascade_id")
-            fast = sum((g["delay_hours"].iloc[1:] < 1).any() for _, g in firsts)
-            slow = sum((g["delay_hours"].iloc[1:] >= 24).all() for _, g in firsts)
-            st.write(f"Cascades with a repost under 1 hour: {fast}. "
-                     f"Cascades with every repost 24+ hours later: {slow}.")
-            st.dataframe(cas, use_container_width=True)
-    with tabs[4]:
-        cm = data["channel_mentions"]
-        if not cm.empty:
-            st.dataframe(cm["mentioned_channel"].value_counts().rename("count"),
-                         use_container_width=True)
-            st.dataframe(cm, use_container_width=True)
-    with tabs[5]:
-        u = data["urls"]
-        if not u.empty:
-            st.dataframe(u["domain"].value_counts().rename("count"), use_container_width=True)
-    with tabs[6]:
-        st.dataframe(data["full_scan_hits"], use_container_width=True)
-    with tabs[7]:
-        st.code("\n".join(ss.results["log"]))
+        def counts(series, sep, label):
+            items = (series.fillna("").str.split(sep).explode().str.strip())
+            return items[items != ""].value_counts().rename_axis(label).rename("posts")
+
+        tabs = st.tabs(["Posts", "Per channel", "Forward sources", "Cascades",
+                        "Mentioned channels", "Domains", "Run log"])
+        with tabs[0]:
+            st.dataframe(posts, width="stretch")
+        with tabs[1]:
+            per = (posts.groupby("channel")
+                   .agg(posts=("message_id", "size"), forwards=("is_forward", "sum"))
+                   .assign(original=lambda d: d.posts - d.forwards)
+                   .sort_values("posts", ascending=False))
+            st.dataframe(per, width="stretch")
+        with tabs[2]:
+            st.dataframe(posts["forwarded_from"].dropna().value_counts()
+                         .rename_axis("source").rename("forwards"),
+                         width="stretch")
+        with tabs[3]:
+            cas = posts[posts["cascade_id"].notna()].sort_values(["cascade_id", "date"])
+            if cas.empty:
+                st.write("No post text appeared in more than one channel.")
+            else:
+                later = cas[cas.groupby("cascade_id").cumcount() > 0]
+                fast = later[later["hours_after_first"] < 1]["cascade_id"].nunique()
+                slow = n_cas - later[later["hours_after_first"] < 24]["cascade_id"].nunique()
+                st.write(f"Cascades with a repost under 1 hour: {fast}. "
+                         f"Cascades with every repost 24+ hours later: {slow}.")
+                st.dataframe(cas[["cascade_id", "cascade_channel_count", "channel", "date",
+                                  "hours_after_first", "views", "link", "text"]],
+                             width="stretch")
+        with tabs[4]:
+            st.dataframe(counts(posts["mentioned_channels"], ",", "channel"),
+                         width="stretch")
+        with tabs[5]:
+            st.dataframe(counts(posts["domains"], ",", "domain"), width="stretch")
+        with tabs[6]:
+            st.code("\n".join(ss.results["log"]))
