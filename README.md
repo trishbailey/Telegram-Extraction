@@ -10,6 +10,7 @@ Each run produces a zip file containing:
 
 | File | Contents |
 |---|---|
+| `<prefix>_workbook.xlsx` | Excel workbook with one sheet per table below. Post text is wrapped and readable in the cell. |
 | `<prefix>_keyword_posts.csv` | Every post that matched a search keyword, across all channels |
 | `posts_by_channel/<prefix>_<channel>.csv` | The same posts, split into one file per channel |
 | `<prefix>_forwarding_network.csv` | Matched posts that were forwards, with the original source and dates |
@@ -18,9 +19,11 @@ Each run produces a zip file containing:
 | `<prefix>_cascades.csv` | Near-identical posts that appeared in two or more channels, with the delay in hours from first appearance |
 | `<prefix>_full_scan_hits.csv` | Posts containing a full-scan keyword (only when full-scan keywords are used) |
 
-Files with no rows are left out of the zip.
+Files with no rows are left out of the zip. The workbook can also be downloaded on its own.
 
-Each post record includes: channel, channel title, message ID, link, date, edit date, post author, views, forwards, replies, forward status and source, original forward date, the search term that surfaced the post, matched keywords, reply-to message ID, album ID, media type and full text. Media files are not downloaded.
+CSV files are saved as UTF-8 with a byte-order mark so Excel displays emoji and non-Latin scripts correctly. Post text keeps its original line breaks. In the CSV files, Excel shows only the first line of each post until you turn on **Wrap Text** for the `text` column. The workbook has wrapping turned on already.
+
+Each post record includes: channel, date, text, link, views, forwards, replies, forward status and source, original forward date, the search term that surfaced the post, matched keywords, media type, channel title, message ID, edit date, post author, reply-to message ID and album ID. Media files are not downloaded.
 
 ## Files in this repository
 
@@ -79,7 +82,7 @@ The script also runs in Google Colab: paste its contents into a cell, add `!pip 
    - **Max characters per message:** 0 keeps the full text.
    - **File name prefix:** added to every output file.
 3. **Run.** Click **Start collection**. The progress bar and log update every two seconds. **Cancel collection** stops the run.
-4. **Download.** When the run finishes, review the result tabs and click **Download all CSVs (.zip)**. Download promptly: results exist only in the browser session and disappear if the app restarts or you disconnect.
+4. **Download.** When the run finishes, review the result tabs and click **Download everything (.zip)** or **Download Excel workbook (.xlsx)**. Download promptly: results exist only in the browser session and disappear if the app restarts or you disconnect.
 5. **Disconnect** from the sidebar when finished.
 
 ## Operating notes
