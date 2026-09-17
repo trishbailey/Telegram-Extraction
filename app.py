@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.styles import Alignment, Font
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telethon.sessions import StringSession
@@ -300,9 +302,24 @@ def normalize_text(text):
     return re.sub(r"\s+", " ", (text or "")[:200].lower().strip())
 
 
+POST_COLUMNS = [
+    "channel", "date", "text", "link", "views", "forwards", "replies",
+    "is_forward", "forwarded_from", "original_fwd_date", "search_term",
+    "matched_keywords", "media_type", "channel_title", "message_id",
+    "edit_date", "post_author", "reply_to_msg_id", "grouped_id",
+]
+
+
+def order_posts(df):
+    if df.empty:
+        return df
+    return df[[c for c in POST_COLUMNS if c in df.columns]
+              + [c for c in df.columns if c not in POST_COLUMNS]]
+
+
 def build_outputs(messages, scan_hits, min_cascade_chars):
-    df = pd.DataFrame(messages)
-    out = {"messages": df, "full_scan_hits": pd.DataFrame(scan_hits)}
+    df = order_posts(pd.DataFrame(messages))
+    out = {"messages": df, "full_scan_hits": order_posts(pd.DataFrame(scan_hits))}
 
     if df.empty:
         for name in ("forwarding_network", "channel_mentions", "urls", "cascades"):
@@ -367,18 +384,72 @@ def build_outputs(messages, scan_hits, min_cascade_chars):
     return out
 
 
+SHEET_NAMES = {
+    "messages": "Posts",
+    "full_scan_hits": "Full-scan hits",
+    "forwarding_network": "Forwarding",
+    "cascades": "Cascades",
+    "channel_mentions": "Mentions",
+    "urls": "URLs",
+}
+WRAP_COLUMNS = {"text", "text_snippet"}
+EXCEL_CELL_LIMIT = 32767
+
+
+def csv_bytes(df):
+    # utf-8-sig adds the byte-order mark Excel needs to read emoji and Cyrillic correctly
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def xlsx_bytes(outputs):
+    def clean(v):
+        if isinstance(v, str):
+            return ILLEGAL_CHARACTERS_RE.sub("", v)[:EXCEL_CELL_LIMIT]
+        return v
+
+    base_font = Font(name="Arial", size=10)
+    head_font = Font(name="Arial", size=10, bold=True)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, sheet in SHEET_NAMES.items():
+            df = outputs.get(name)
+            if df is None or df.empty:
+                continue
+            df.map(clean).to_excel(xw, sheet_name=sheet, index=False)
+            ws = xw.sheets[sheet]
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            wrap_letters = set()
+            for cell in ws[1]:
+                cell.font = head_font
+                header = str(cell.value)
+                if header in WRAP_COLUMNS:
+                    wrap_letters.add(cell.column_letter)
+                    ws.column_dimensions[cell.column_letter].width = 90
+                else:
+                    ws.column_dimensions[cell.column_letter].width = min(max(len(header) + 4, 12), 30)
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.font = base_font
+                    cell.alignment = Alignment(vertical="top",
+                                               wrap_text=cell.column_letter in wrap_letters)
+                if wrap_letters:
+                    ws.row_dimensions[row[0].row].height = 150
+    return buf.getvalue()
+
+
 def zip_outputs(outputs, prefix):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{prefix}_workbook.xlsx", xlsx_bytes(outputs))
         for name, df in outputs.items():
             if df.empty:
                 continue
             if name == "messages":
                 name = "keyword_posts"
                 for channel, part in df.groupby("channel"):
-                    zf.writestr(f"posts_by_channel/{prefix}_{channel}.csv",
-                                part.to_csv(index=False))
-            zf.writestr(f"{prefix}_{name}.csv", df.to_csv(index=False))
+                    zf.writestr(f"posts_by_channel/{prefix}_{channel}.csv", csv_bytes(part))
+            zf.writestr(f"{prefix}_{name}.csv", csv_bytes(df))
     return buf.getvalue()
 
 
@@ -580,10 +651,14 @@ if ss.results:
     data = ss.results["data"]
     msgs = data["messages"]
     st.subheader("Results")
-    st.download_button("Download all CSVs (.zip)",
+    b1, b2 = st.columns(2)
+    stamp = f"{ss.results['prefix']}_{date.today():%Y%m%d}"
+    b1.download_button("Download everything (.zip)",
                        zip_outputs(data, ss.results["prefix"]),
-                       file_name=f"{ss.results['prefix']}_{date.today():%Y%m%d}.zip",
-                       mime="application/zip", type="primary")
+                       file_name=f"{stamp}.zip", mime="application/zip", type="primary")
+    b2.download_button("Download Excel workbook (.xlsx)",
+                       xlsx_bytes(data), file_name=f"{stamp}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     if ss.results["skipped"]:
         st.warning("Skipped or partially collected: " + ", ".join(ss.results["skipped"]))
 
