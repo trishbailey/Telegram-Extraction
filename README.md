@@ -1,6 +1,6 @@
 # Telegram Channel Collector
 
-A web app for collecting posts from public Telegram channels with Boolean queries and mapping how those channels refer their audiences to one another. Each user signs in with their own Telegram account and API credentials, enters target channels, a query and a date range, and downloads the results as an Excel file. Each post row includes forwarding sources, Telegram mentions, social media accounts, linked websites and cross-channel reposting (cascades). A second page maps referrals as labeled hub-and-spoke diagrams: where a whole collection of channels sends its audience, and who sends audiences to any single channel.
+A web app for collecting posts from public Telegram channels with Boolean queries and mapping how those channels refer their audiences to one another. Each user signs in with their own Telegram account and API credentials, enters target channels, a query and a date range, and downloads the results as an Excel file. Each post row includes forwarding sources, Telegram mentions, social media accounts, linked websites and cross-channel reposting (cascades). A second page maps referrals in labeled diagrams: which collected channel sends its audience where, side by side, and who sends audiences to any single channel.
 
 Multiple users can run collections at the same time. Every browser session keeps its own Telegram connection, settings and results in memory. Nothing is written to the server's disk.
 
@@ -223,18 +223,20 @@ A mention is the channel's own writing: a citation, recommendation, cross-promot
 
 ### Views
 
-Both views use the same design: labeled cards on each side, curved lines whose thickness shows volume, and a hub in the center. Every card shows its name, so the diagrams stay readable at any size.
+Both views use labeled cards joined by curved lines whose thickness shows volume. Every card shows its name, so the diagrams stay readable at any size.
 
-**All collected channels.** The default when the data covers more than one channel.
+**Compare channels.** The default when the data covers more than one channel. Every referral stays attributed to the channel that made it.
 
-- **Hub:** the whole collection.
-- **Left:** the collected channels, each with one line sized by the number of referrals it makes. Cards are sorted from most to fewest.
-- **Right:** where the collection sends its audience, in three sections: Telegram channels, social media accounts and websites. Each section is sorted from most to least referred, and lines are colored by referral type and platform.
-- **Both sides:** a collected channel that other collected channels refer to appears on both sides.
+- **Left:** the channels being compared, each with its own color. A channel's card grows taller with the number of lines it sends, and cards are sorted from most to fewest referrals.
+- **Right:** the destinations those channels refer their audience to, in three sections (Telegram channels, social media accounts, websites), each sorted from most to least referred.
+- **Lines:** each line runs from one channel to one destination. Thickness shows volume on one scale for every channel, so widths compare directly.
+- **Destination cards:** a colored dot and count for each channel that refers to the destination, such as ● 12 ● 5 ● 2. Hover over a card for the channel names, posts and views, or over a line for that channel's figures.
 - **Controls:**
-  - **Show top** (see [Detail level](#detail-level))
-  - **Only destinations shared by at least this many collected channels:** keeps only destinations that several collected channels refer to, which can point to common sourcing or coordination
-- **Shared destinations table:** below the diagram, every destination referred to by two or more collected channels, with the number of channels, their names, posts, views, and first and last dates.
+  - **Channels to compare:** up to 10 at a time, listed by how many referrals each makes. The six most active are selected at first.
+  - **Only destinations shared by at least this many of these channels:** keeps destinations several of the selected channels refer to, which can point to common sourcing or coordination.
+  - **Line color:** by source channel, or by referral type and platform (the platform colors used elsewhere). In referral-type mode, each channel sends one line per type.
+  - **Show top** (see [Detail level](#detail-level)).
+- **Referrals by channel table:** one row per destination and one column per channel with its number of posts (or views), plus the total, how many channels refer to the destination, and the referral types. **Include every collected channel in the table** adds a column for every collected channel, beyond the ten in the diagram. The table downloads as `.xlsx`.
 
 **One channel.** Pick a channel, social media account or website. It sits in the center.
 
@@ -260,7 +262,8 @@ A line under the controls reports what is shown, for example "10 of 36 Telegram 
 
 - **Diagrams:** both views download as PNG or SVG. The SVG scales cleanly in PowerPoint and Word.
 - **Referral table (.xlsx):** one row per channel pair, referral type and platform, with a column marking references inside forwarded posts.
-- **Tables:** the shared destinations and counterparty tables can be downloaded from the table toolbar (hover over a table).
+- **Referrals by channel (.xlsx):** the comparison table from **Compare channels**.
+- **Other tables:** the counterparty tables can be downloaded from the table toolbar (hover over a table).
 
 ### Coverage
 

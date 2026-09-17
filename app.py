@@ -1737,19 +1737,15 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
     LX, RX, HX = 12, W - 12 - CW, W / 2
     TOP = 112
 
-    is_all = focus == ALL_KEY
-
-    def column(sections, side):
+    def column(sections):
         items = []
         for kind in KINDS:
             if sections[kind]:
-                title = ("Collected channels" if is_all and side == "in"
-                         else KIND_TITLES[kind])
-                items.append(("label", title))
+                items.append(("label", KIND_TITLES[kind]))
                 items += [("card", c) for c in sections[kind]]
         return items
 
-    left_items, right_items = column(left, "in"), column(right, "out")
+    left_items, right_items = column(left), column(right)
 
     def height_of(items):
         return sum(LABEL_H if kind == "label" else CH + GAP for kind, _ in items)
@@ -1784,18 +1780,8 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                 continue
             top, mid = y, y + CH / 2
             y += CH + GAP
-            if is_all and side == "in":
-                # One line per collected channel, sized by all of its referrals.
-                merged = {}
-                for l in c["lines"]:
-                    m = merged.setdefault(l["via"], {"type": "total", "platform": "",
-                                                     "via": l["via"], "posts": 0, "views": 0})
-                    m["posts"] += l["posts"]
-                    m["views"] += l["views"]
-                lines = sorted(merged.values(), key=lambda l: l["via"])
-            else:
-                lines = sorted(c["lines"], key=lambda l: (l["via"], TYPES.index(l["type"]),
-                                                          l["platform"]))
+            lines = sorted(c["lines"], key=lambda l: (l["via"], TYPES.index(l["type"]),
+                                                      l["platform"]))
             widths = [stroke(l[weight]) for l in lines]
             span = sum(widths) + 2 * (len(widths) - 1)
             offset = mid - span / 2
@@ -1805,14 +1791,11 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                 yb = HY + (ya - mid) * 0.35
                 xa, xb = (x0 + CW, HX - R + 4) if side == "in" else (x0, HX + R - 4)
                 xc = (xa + xb) / 2
-                color = (HUB_COLORS["telegram"] if l["type"] == "total"
-                         else line_color(l["type"], l["platform"]))
-                if l["type"] != "total":
-                    used.add((l["type"], l["platform"]))
+                color = line_color(l["type"], l["platform"])
+                used.add((l["type"], l["platform"]))
                 if l["via"]:
                     used.add(("via", ""))
-                what = ("referral" if l["type"] == "total"
-                        else platform_name(l["platform"]) + " link" if l["type"] == "social"
+                what = (platform_name(l["platform"]) + " link" if l["type"] == "social"
                         else TYPE_NAMES[l["type"]])
                 via_note = " inside forwarded posts" if l["via"] else ""
                 tip = (f"{c['label']}: {plural(int(l['posts']), what)}{via_note}, "
@@ -1826,15 +1809,7 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                     f'<title>{escape(tip)}</title></path>')
 
             stats = card_stats(c, weight)
-            if is_all and side == "in":
-                direct_lines = [l for l in c["lines"] if not l["via"]]
-                total = sum(l["posts"] for l in direct_lines)
-                short_stats = (f"{compact(sum(l['views'] for l in direct_lines))} views · "
-                               if weight == "views" else "") + plural(int(total), "referral")
-                tip_stats = stats
-                stats = short_stats
-            else:
-                tip_stats = stats
+            tip_stats = stats
             if c["other"]:
                 fill = "#EDF0F4"
             else:
@@ -1886,7 +1861,7 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
         hub_color = PLATFORMS[key_platform(focus)][2]
     else:
         hub_color = HUB_COLORS[focus_kind]
-    name = "All channels" if is_all else fit(focus_label, 2 * R - 20, 14, bold=True)
+    name = fit(focus_label, 2 * R - 20, 14, bold=True)
     n_hub = len(tin["ids"] | tout["ids"])
     hub = (f'<circle cx="{HX}" cy="{HY}" r="{R + 6}" fill="#FFFFFF" stroke="#D5DBE3"/>'
            f'<circle cx="{HX}" cy="{HY}" r="{R}" fill="{hub_color}"/>'
@@ -1906,8 +1881,7 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                 f'text-anchor="{align}">{value:,}</text>')
 
     step = BOX_H + BOX_GAP
-    boxes = [box(LX, box_top, "Collected channels referring" if is_all
-                 else "Telegram channels referring", tin["counts"]["telegram"], "end"),
+    boxes = [box(LX, box_top, "Telegram channels referring", tin["counts"]["telegram"], "end"),
              box(LX, box_top + step, "Posts with referrals", tin["posts"], "end")]
     if right_boxes:
         boxes += [
@@ -1945,7 +1919,7 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                   else "Line width and order: views")
     headers = (f'<text x="12" y="60" font-size="11.5" fill="#94A0B0">{width_note}</text>'
                f'<text x="{LX}" y="92" font-size="15" font-weight="bold" fill="#2D3748">'
-               f'{"Channels in the collection" if is_all else "Incoming referrals"}</text>'
+               f'Incoming referrals</text>'
                f'<text x="{RX + CW}" y="92" font-size="15" font-weight="bold" fill="#2D3748" '
                f'text-anchor="end">Outgoing referrals</text>')
 
@@ -1961,39 +1935,341 @@ def svg_to_png(svg):
     return bytes(resvg_py.svg_to_bytes(svg_string=svg, zoom=2, background="#ffffff"))
 
 
-# ── All-collected-channels diagram ──────────────────────────────────
-ALL_KEY = "__all_collected__"
+# ── Compare-channels diagram ────────────────────────────────────────
+CHANNEL_COLORS = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#D55E00", "#56B4E9",
+                  "#9467BD", "#8C564B", "#17BECF", "#B8860B"]
+MAX_COMPARE = len(CHANNEL_COLORS)
 
 
-def collection_view(summary, edges, collected):
-    """Recast referrals so the whole collection is the hub: collected channels on the left,
-    everything they refer to on the right."""
-    part = summary[summary["referrer_key"].isin(collected)]
-    left = part.assign(referred_key=ALL_KEY, referred="All collected channels",
-                       referred_short="All collected channels", referred_kind="telegram")
-    right = part.assign(referrer_key=ALL_KEY, referrer="All collected channels")
-    cols = ["referrer_key", "referrer", "referred_key", "referred", "referred_short",
-            "referred_kind", "type", "platform", "via"]
-    agg = {"posts": ("posts", "sum"), "views": ("views", "sum"),
-           "first_seen": ("first_seen", "min"), "last_seen": ("last_seen", "max"),
-           "example_post": ("example_post", "first")}
-    both = pd.concat([left, right]).groupby(cols, dropna=False).agg(**agg).reset_index()
-    e = edges[edges["referrer_key"].isin(collected)]
-    e_all = pd.concat([e.assign(referred_key=ALL_KEY), e.assign(referrer_key=ALL_KEY)])
-    return both, e_all
+def compare_cards(part, weight, limits):
+    """Destination cards for the compare view, per section, most frequent first."""
+    sections = {k: [] for k in KINDS}
+    part = part.assign(_kind=part["referred_key"].map(key_kind))
+
+    def card(rows, key, label, kind, other=False, unknown=False):
+        if unknown and "(" in label:
+            label = label[label.index("(") + 1:].rstrip(")").capitalize()
+        plats = [p for p in rows["platform"].unique() if p]
+        lines = (rows.groupby(["referrer_key", "type", "platform", "via"], dropna=False)
+                 [["posts", "views"]].sum().reset_index().to_dict("records"))
+        return {"key": key, "label": label, "kind": kind, "other": other,
+                "unknown": unknown, "platform": plats[0] if len(plats) == 1 else "",
+                "lines": lines}
+
+    for kind in KINDS:
+        grp = part[part["_kind"] == kind]
+        n = limits.get(("telegram", "out") if kind == "telegram" else kind, 10)
+        if grp.empty or n == 0:
+            continue
+        direct_w = grp[~grp["via"]].groupby("referred_key")[weight].sum()
+        via_w = grp[grp["via"]].groupby("referred_key")[weight].sum()
+        names = grp.groupby("referred_key")["referred_short"].first()
+        order = pd.DataFrame({"d": direct_w, "v": via_w}).fillna(0)
+        order["unknown"] = [k.endswith(":?") for k in order.index]
+        order = order.sort_values(["unknown", "d", "v"], ascending=[True, False, False])
+        shown, rest = list(order.index[:n]), list(order.index[n:])
+        for k in shown:
+            sections[kind].append(card(grp[grp["referred_key"] == k], k, names[k], kind,
+                                       unknown=k.endswith(":?")))
+        if rest:
+            noun = {"telegram": "channel", "social": "account", "website": "website"}[kind]
+            sections[kind].append(card(grp[grp["referred_key"].isin(rest)],
+                                       f"__other_{kind}__", other_label(len(rest), noun),
+                                       kind, other=True))
+    return sections
 
 
-def shared_destinations(summary, min_channels=2):
-    """Destinations referred to by several collected channels."""
-    direct = summary[~summary["via"]]
-    if direct.empty:
+def compare_svg(summary, channels, weight, limits, show_via=False, color_by="channel"):
+    """channels: list of (key, label) for the collected channels to compare."""
+    keys = [k for k, _ in channels]
+    colors = {k: CHANNEL_COLORS[i % MAX_COMPARE] for i, k in enumerate(keys)}
+    names = dict(channels)
+    part = summary[summary["referrer_key"].isin(keys)]
+    if not show_via:
+        part = part[~part["via"]]
+    sections = compare_cards(part, weight, limits)
+
+    W, CW, CH, GAP, LABEL_H = 1100, 300, 64, 14, 30
+    LX, RX = 12, W - 12 - CW
+    TOP = 128
+
+    made = part[~part["via"]].groupby("referrer_key")[weight].sum()
+    left_cards = sorted(keys, key=lambda k: -made.get(k, 0))
+    right_items = []
+    for kind in KINDS:
+        if sections[kind]:
+            right_items.append(("label", KIND_TITLES[kind]))
+            right_items += [("card", c) for c in sections[kind]]
+    cards = [c for kind, c in right_items if kind == "card"]
+    order_of = {c["key"]: i for i, c in enumerate(cards)}
+
+    # Lines: one per channel and destination (and per type and platform when coloring
+    # by referral type).
+    lines = []
+    for c in cards:
+        merged = {}
+        for l in c["lines"]:
+            by_type = color_by != "channel"
+            mk = (l["referrer_key"], l["via"]) + ((l["type"], l["platform"]) if by_type else ())
+            m = merged.setdefault(mk, {"ch": l["referrer_key"],
+                                       "type": l["type"] if by_type else "channel",
+                                       "platform": l["platform"] if by_type else "",
+                                       "via": l["via"], "posts": 0, "views": 0})
+            m["posts"] += l["posts"]
+            m["views"] += l["views"]
+        for m in merged.values():
+            m["dest"] = c["key"]
+            m["dest_label"] = c["label"]
+            lines.append(m)
+    vmax = max((l[weight] for l in lines), default=1) or 1
+    for l in lines:
+        l["w"] = 1.2 + 16 * sqrt(l[weight] / vmax)
+
+    ch_rank = {k: i for i, k in enumerate(left_cards)}
+    type_rank = lambda l: (TYPES.index(l["type"]) if l["type"] in TYPES else 0, l["platform"])
+    outs_of = {k: sorted([l for l in lines if l["ch"] == k],
+                         key=lambda l: (order_of[l["dest"]], l["via"], type_rank(l)))
+               for k in left_cards}
+    ins_of = {c["key"]: sorted([l for l in lines if l["dest"] == c["key"]],
+                               key=lambda l: (ch_rank[l["ch"]], l["via"], type_rank(l)))
+              for c in cards}
+
+    def span(ls):
+        return sum(l["w"] for l in ls) + 1.5 * max(len(ls) - 1, 0)
+
+    # Channel cards grow to hold their lines; one scale keeps widths comparable.
+    MAX_LEFT_H = 320
+    left_h_of = {k: min(max(CH, span(outs_of[k]) + 10), MAX_LEFT_H) for k in left_cards}
+    scale = min([1.0] + [(left_h_of[k] - 10) / span(outs_of[k])
+                         for k in left_cards if outs_of[k]])
+    for l in lines:
+        l["w"] *= scale
+
+    left_h = LABEL_H + sum(left_h_of[k] + GAP for k in left_cards)
+    right_h = sum(LABEL_H if kind == "label" else CH + GAP for kind, _ in right_items)
+    body = max(left_h, right_h, 3 * (CH + GAP))
+    H = TOP + body + 20
+
+    left_pos, y = {}, TOP + (body - left_h) / 2
+    left_label_y = y
+    y += LABEL_H
+    for k in left_cards:
+        left_pos[k] = y
+        y += left_h_of[k] + GAP
+    right_pos, labels_svg, y = {}, [], TOP + (body - right_h) / 2
+    for kind, item in right_items:
+        if kind == "label":
+            labels_svg.append(
+                f'<text x="{RX}" y="{y + 20}" font-size="12" font-weight="bold" '
+                f'fill="#8A96A8" letter-spacing="0.5">{escape(item)}</text>')
+            y += LABEL_H
+        else:
+            right_pos[item["key"]] = y
+            y += CH + GAP
+    labels_svg.append(
+        f'<text x="{LX + CW}" y="{left_label_y + 20}" font-size="12" font-weight="bold" '
+        f'fill="#8A96A8" text-anchor="end" letter-spacing="0.5">Collected channels</text>')
+
+    ya, yb = {}, {}
+    for k in left_cards:
+        off = left_pos[k] + left_h_of[k] / 2 - span(outs_of[k]) / 2
+        for l in outs_of[k]:
+            l["wa"] = l["w"]
+            ya[id(l)] = off + l["w"] / 2
+            off += l["w"] + 1.5
+    for c in cards:
+        ins = ins_of[c["key"]]
+        sp = span(ins)
+        sc = min(1.0, (CH - 8) / sp) if sp else 1
+        off = right_pos[c["key"]] + CH / 2 - sp * sc / 2
+        for l in ins:
+            l["wb"] = l["w"] * sc
+            yb[id(l)] = off + l["wb"] / 2
+            off += (l["w"] + 1.5) * sc
+
+    paths = []
+    xa, xb = LX + CW, RX
+    xc1, xc2 = xa + (xb - xa) * 0.45, xa + (xb - xa) * 0.55
+    for l in sorted(lines, key=lambda l: -l["w"]):
+        if color_by == "channel":
+            color = colors[l["ch"]]
+            what = "referral"
+        else:
+            color = line_color(l["type"], l["platform"])
+            what = (platform_name(l["platform"]) + " link" if l["type"] == "social"
+                    else TYPE_NAMES[l["type"]])
+        tip = (f"{names[l['ch']]} → {l['dest_label']}: "
+               f"{plural(int(l['posts']), what)}"
+               f"{' inside forwarded posts' if l['via'] else ''}, {l['views']:,.0f} views")
+        dash = ' stroke-dasharray="7 6"' if l["via"] else ""
+        opacity = 0.35 if l["via"] else 0.62
+        y1, y2 = ya[id(l)], yb[id(l)]
+        paths.append(
+            f'<path d="M{xa:.1f},{y1:.1f} C{xc1:.1f},{y1:.1f} {xc2:.1f},{y2:.1f} '
+            f'{xb:.1f},{y2:.1f}" fill="none" stroke="{color}" stroke-opacity="{opacity}" '
+            f'stroke-width="{min(l["wa"], l["wb"]):.1f}"{dash}><title>{escape(tip)}</title></path>')
+
+    cards_svg = []
+
+    def badge(cx, cy, text, color):
+        size = 17 if len(text) == 1 else 13
+        return (f'<circle cx="{cx}" cy="{cy}" r="20" fill="{color}"/>'
+                f'<text x="{cx}" y="{cy + size / 3 + 0.5:.1f}" font-size="{size}" '
+                f'font-weight="bold" fill="#FFFFFF" text-anchor="middle">'
+                f'{escape(text)}</text>')
+
+    by_type_all = part.groupby(["referrer_key", "type", "via"])["posts"].sum()
+    for k in left_cards:
+        top = left_pos[k]
+        ch_h = left_h_of[k]
+        mid = top + ch_h / 2
+        direct = part[(part["referrer_key"] == k) & ~part["via"]]
+        total = int(direct["posts"].sum())
+        views = direct["views"].sum()
+        stats = ((f"{compact(views)} views · " if weight == "views" else "")
+                 + plural(total, "referral"))
+        detail = []
+        for t in TYPES:
+            v = int(by_type_all.get((k, t, False), 0))
+            if v:
+                detail.append(plural(v, TYPE_NAMES[t]))
+        tip = f"{names[k]}\n" + ", ".join(detail)
+        cards_svg.append(
+            f'<g><title>{escape(tip)}</title>'
+            f'<rect x="{LX}" y="{top}" width="{CW}" height="{ch_h:.0f}" rx="6" '
+            f'fill="#FFFFFF" stroke="{colors[k]}" stroke-width="2"/>'
+            + badge(LX + CW - 34, mid, names[k].lstrip("@")[:1].upper() or "?", colors[k])
+            + f'<text x="{LX + 16}" y="{mid - 5:.1f}" font-size="15.5" fill="#2D3748">'
+            f'{escape(fit(names[k], CW - 70, 15.5))}</text>'
+            f'<text x="{LX + 16}" y="{mid + 16:.1f}" font-size="12.5" fill="#718096">'
+            f'{escape(stats)}</text></g>')
+
+    for c in cards:
+        top = right_pos[c["key"]]
+        mid = top + CH / 2
+        per = {}
+        for l in c["lines"]:
+            if not l["via"]:
+                p = per.setdefault(l["referrer_key"], [0, 0])
+                p[0] += l["posts"]
+                p[1] += l["views"]
+        ranked = sorted(per.items(), key=lambda kv: ch_rank[kv[0]])
+        idx = 1 if weight == "views" else 0
+        parts, used_px = [], 0
+        prefix = (platform_name(c["platform"]) + "  "
+                  if c["kind"] == "social" and c["platform"] else "")
+        budget = CW - 80 - len(prefix) * 7
+        shown_n = 0
+        for ch, vals in ranked:
+            txt = compact(vals[idx])
+            px = 14 + len(txt) * 7.5 + 8
+            if used_px + px > budget:
+                break
+            parts.append(f'<tspan fill="{colors[ch]}" font-size="14">●</tspan>'
+                         f'<tspan fill="#4A5568"> {escape(txt)}  </tspan>')
+            used_px += px
+            shown_n += 1
+        if shown_n < len(ranked):
+            parts.append(f'<tspan fill="#718096">+{len(ranked) - shown_n}</tspan>')
+        via_total = sum(l["posts"] for l in c["lines"] if l["via"])
+        if via_total and shown_n == len(ranked):
+            parts.append(f'<tspan fill="#94A0B0">· {via_total:,} via fwd</tspan>')
+        tip_lines = [c["label"]] + [
+            f"{names[ch]}: {plural(int(v[0]), 'post')}, {v[1]:,.0f} views" for ch, v in ranked]
+        if via_total:
+            tip_lines.append(f"{via_total:,} inside forwarded posts")
+        if c["other"]:
+            fill = "#EDF0F4"
+        else:
+            fill = {"telegram": "#FFFFFF", "social": "#F6F7FA", "website": "#EAF7EF"}[c["kind"]]
+        if c["other"]:
+            btxt, bcol = "…", "#8A96A8"
+        elif c["kind"] == "social" and c["platform"]:
+            btxt, bcol = PLATFORMS[c["platform"]][1], PLATFORMS[c["platform"]][2]
+        elif c["kind"] == "website":
+            btxt, bcol = c["label"][:1].upper(), "#27AE60"
+        else:
+            btxt, bcol = c["label"].lstrip("@")[:1].upper() or "?", "#8A96A8"
+        cards_svg.append(
+            f'<g><title>{escape(chr(10).join(tip_lines))}</title>'
+            f'<rect x="{RX}" y="{top}" width="{CW}" height="{CH}" rx="6" fill="{fill}" '
+            f'stroke="#B8C2CE" stroke-width="1"/>'
+            + badge(RX + 34, mid, btxt, bcol)
+            + f'<text x="{RX + 66}" y="{top + 27}" font-size="15.5" fill="#2D3748">'
+            f'{escape(fit(c["label"], CW - 70, 15.5))}</text>'
+            f'<text x="{RX + 66}" y="{top + 49}" font-size="12.5">'
+            + (f'<tspan fill="#718096">{escape(prefix)}</tspan>' if prefix else "")
+            + "".join(parts) + '</text></g>')
+
+    # Legend: channel colors, then type colors when used
+    legend, lx, ly = [], 12, 30
+    for k in left_cards:
+        text = fit(names[k], 180, 12.5)
+        w = 40 + len(text) * 7.2
+        if lx + w > W - 12:
+            lx, ly = 12, ly + 22
+        legend.append(f'<circle cx="{lx + 7}" cy="{ly - 4}" r="7" fill="{colors[k]}"/>'
+                      f'<text x="{lx + 20}" y="{ly + 1}" font-size="12.5" fill="#2D3748">'
+                      f'{escape(text)}</text>')
+        lx += w
+    if color_by != "channel":
+        present = {(l["type"], l["platform"]) for l in lines}
+        keys_shown = [("mention", "", "Telegram mention"), ("forward", "", "Telegram forward"),
+                      ("social", "youtube", "YouTube"), ("social", "x", "X"),
+                      ("social", "vk", "VK"), ("social", "*", "Other social media"),
+                      ("website", "", "Website")]
+        other_social = any(t == "social" and p not in ("youtube", "x", "vk")
+                           for t, p in present)
+        lx, ly = 12, ly + 24
+        for t, p, text in keys_shown:
+            if (p == "*" and not other_social) or (p != "*" and (t, p) not in present):
+                continue
+            color = OTHER_SOCIAL_COLOR if p == "*" else line_color(t, p)
+            legend.append(f'<line x1="{lx}" y1="{ly - 4}" x2="{lx + 24}" y2="{ly - 4}" '
+                          f'stroke="{color}" stroke-width="6"/>'
+                          f'<text x="{lx + 30}" y="{ly + 1}" font-size="12.5" fill="#4A5568">'
+                          f'{escape(text)}</text>')
+            lx += 44 + len(text) * 7.2
+    note = ("Line color: source channel. Line width and order: "
+            if color_by == "channel" else "Line color: referral type and platform. "
+                                          "Line width and order: ")
+    note += "number of posts" if weight == "posts" else "views"
+    if show_via:
+        note += ". Dashed: references inside forwarded posts"
+    legend.append(f'<text x="12" y="{ly + 24}" font-size="11.5" fill="#94A0B0">'
+                  f'{escape(note)}</text>')
+    head_y = max(ly + 56, 96)
+    headers = (f'<text x="{LX}" y="{head_y}" font-size="15" font-weight="bold" '
+               f'fill="#2D3748">Channels compared</text>'
+               f'<text x="{RX + CW}" y="{head_y}" font-size="15" font-weight="bold" '
+               f'fill="#2D3748" text-anchor="end">Where each sends its audience</text>')
+    shift = max(0, head_y + 20 - TOP)
+    H += shift
+    body_svg = ("".join(paths) + "".join(labels_svg) + "".join(cards_svg))
+    if not cards:
+        body_svg += (f'<text x="{RX + CW / 2}" y="{TOP + body / 2}" font-size="14" '
+                     f'fill="#94A0B0" text-anchor="middle">No referrals match these '
+                     f'settings</text>')
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H:.0f}" '
+            f'width="{W}" height="{round(H)}" '
+            f'font-family="DejaVu Sans, Helvetica, Arial, sans-serif">'
+            f'<rect width="{W}" height="{H:.0f}" fill="#FFFFFF"/>'
+            + "".join(legend) + headers
+            + f'<g transform="translate(0,{shift})">' + body_svg + "</g></svg>"), H
+
+
+def compare_table(summary, channels, weight, show_via=False):
+    """One row per destination, one column per compared channel."""
+    keys = [k for k, _ in channels]
+    names = dict(channels)
+    part = summary[summary["referrer_key"].isin(keys) & ~summary["via"]]
+    if part.empty:
         return pd.DataFrame()
-    g = direct.groupby(["referred_key", "referred"])
-    table = g.agg(collected_channels=("referrer_key", "nunique"),
-                  posts=("posts", "sum"), views=("views", "sum"),
-                  first_seen=("first_seen", "min"), last_seen=("last_seen", "max")).reset_index()
-    names = g["referrer"].agg(lambda s: ", ".join(sorted(set(s)))).rename("referred_to_by")
-    table = table.merge(names.reset_index(), on=["referred_key", "referred"])
+    wide = part.pivot_table(index=["referred_key", "referred"], columns="referrer_key",
+                            values=weight, aggfunc="sum", fill_value=0)
+    wide = wide[[k for k in keys if k in wide.columns]]
+    wide.columns = [names[k] for k in wide.columns]
+    out = wide.reset_index()
 
     def kind_name(k):
         kind = key_kind(k)
@@ -2001,13 +2277,21 @@ def shared_destinations(summary, min_channels=2):
             return platform_name(key_platform(k))
         return "Website" if kind == "website" else "Telegram"
 
-    table["type"] = table["referred_key"].map(kind_name)
-    table = table[table["collected_channels"] >= min_channels]
-    table = table.rename(columns={"referred": "destination"})
-    return (table[["destination", "type", "collected_channels", "referred_to_by", "posts",
-                   "views", "first_seen", "last_seen"]]
-            .sort_values(["collected_channels", "posts"], ascending=False)
-            .reset_index(drop=True))
+    out.insert(1, "type", out["referred_key"].map(kind_name))
+    chan_cols = list(wide.columns)
+    out["total"] = out[chan_cols].sum(axis=1)
+    out["channels"] = (out[chan_cols] > 0).sum(axis=1)
+    types = (part.groupby("referred_key")["type"]
+             .agg(lambda s: ", ".join(TYPE_NAMES[t] for t in TYPES if t in set(s))))
+    out["referral_types"] = out["referred_key"].map(types)
+    if show_via:
+        via = summary[summary["referrer_key"].isin(keys) & summary["via"]]
+        via_n = via.groupby("referred_key")["posts"].sum()
+        out["inside_forwarded_posts"] = out["referred_key"].map(via_n).fillna(0).astype(int)
+    out = out.rename(columns={"referred": "destination"}).drop(columns=["referred_key"])
+    front = ["destination", "type", "total", "channels", "referral_types"]
+    return (out[front + chan_cols + [c for c in out.columns if c not in front + chan_cols]]
+            .sort_values(["total", "channels"], ascending=False).reset_index(drop=True))
 
 
 TELEGRAM_APPS_URL = "https://my.telegram.org/auth?to=apps"
@@ -2574,7 +2858,7 @@ def detail_controls(prefix, sections):
     return limits
 
 
-MAP_VIEWS = ["All collected channels", "One channel"]
+MAP_VIEWS = ["Compare channels", "One channel"]
 
 
 def referral_page():
@@ -2690,12 +2974,13 @@ def referral_page():
     n_sources = direct["referrer_key"].nunique()
 
     if "map_view" not in st.session_state:
-        st.session_state["map_view"] = ("All collected channels" if n_sources > 1
+        st.session_state["map_view"] = ("Compare channels" if n_sources > 1
                                         else "One channel")
     view = st.radio("View", MAP_VIEWS, key="map_view", horizontal=True,
-                    help="All collected channels shows the whole collection at once. "
-                         "One channel shows who refers to a single channel, account or "
-                         "website, and where a channel sends its audience.")
+                    help="Compare channels shows which collected channel sends its audience "
+                         "where, side by side. One channel shows who refers to a single "
+                         "channel, account or website, and where a channel sends its "
+                         "audience.")
 
     def show_svg(svg, height, stem):
         size_attr = 'width="1100" height="%d"' % round(height)
@@ -2713,51 +2998,87 @@ def referral_page():
                    "are grouped per platform below the identified accounts. The SVG file "
                    "scales cleanly in PowerPoint and Word.")
 
-    if view == "All collected channels":
+    if view == "Compare channels":
         if n_sources == 0:
             st.info("None of the collected channels refer to other accounts in these posts.")
         else:
-            if n_sources > 1:
-                min_shared = st.slider(
-                    "Only destinations shared by at least this many collected channels",
-                    1, n_sources, 1,
-                    help="Destinations several channels share can indicate common sourcing "
-                         "or coordination. Leave at 1 to include everything.")
+            made = direct.groupby(["referrer_key", "referrer"])["posts"].sum() \
+                .sort_values(ascending=False)
+            options = [kl for kl in made.index]
+            default = options[:min(len(options), 6)]
+            if st.session_state.get("compare_channels") is not None:
+                kept = [kl for kl in st.session_state["compare_channels"] if kl in options]
+                if kept != st.session_state["compare_channels"]:
+                    st.session_state["compare_channels"] = kept or default
             else:
-                min_shared = 1
-            view_summary = summary
-            if min_shared > 1:
-                breadth = direct.groupby("referred_key")["referrer_key"].nunique()
-                keep = set(breadth[breadth >= min_shared].index)
-                view_summary = summary[summary["referred_key"].isin(keep)]
-            hub_preview, _ = collection_view(view_summary, edges, collected)
-            n_in, n_out = section_counts(hub_preview, ALL_KEY, show_via)
-            limits = detail_controls("all", [
-                (("telegram", "in"), ("collected channel", "collected channels"), n_in),
-                (("telegram", "out"), ("Telegram channel referred to",
-                                       "Telegram channels referred to"), n_out["telegram"]),
-                ("social", ("social media account", "social media accounts"), n_out["social"]),
-                ("website", ("website", "websites"), n_out["website"]),
-            ])
-            hub_summary, hub_edges = collection_view(view_summary, edges, collected)
-            hub_edges = hub_edges[hub_edges["referred_key"].isin(
-                set(hub_summary["referred_key"]))]
-            note = plural(n_sources, "channel")
-            svg, height = ego_svg(hub_summary, hub_edges, ALL_KEY, "All collected channels",
-                                  weight, limits, collected=True, show_via=show_via,
-                                  hub_note=note)
-            st.caption("Left: the collected channels, sorted by how many referrals each "
-                       "makes. Right: every Telegram channel, social media account and "
-                       "website they refer their audience to, sorted by how often. A "
-                       "collected channel that other collected channels refer to appears on "
-                       "both sides.")
-            show_svg(svg, height, "all_collected_channels")
-            shared = shared_destinations(summary, max(min_shared, 2))
-            st.markdown("**Destinations shared by two or more collected channels**")
-            if shared.empty:
-                st.caption("No destination is referred to by more than one collected channel.")
+                st.session_state["compare_channels"] = default
+            picked = st.multiselect(
+                f"Channels to compare (up to {MAX_COMPARE})", options,
+                key="compare_channels", max_selections=MAX_COMPARE,
+                format_func=lambda kl: f"{kl[1]} ({made[kl]:,} referrals)",
+                help="Each channel gets its own color. Channels are listed by how many "
+                     "referrals they make.")
+            if len(options) > MAX_COMPARE:
+                st.caption(f"{len(options)} collected channels have referrals. Compare up to "
+                           f"{MAX_COMPARE} at a time; the table below can include all of them.")
+            if not picked:
+                st.info("Choose at least one channel.")
             else:
-                st.dataframe(shared, width="stretch", hide_index=True)
+                keys = [k for k, _ in picked]
+                chosen = summary[summary["referrer_key"].isin(keys)]
+                h1, h2 = st.columns([2, 1])
+                if len(picked) > 1:
+                    min_shared = h1.slider(
+                        "Only destinations shared by at least this many of these channels",
+                        1, len(picked), 1,
+                        help="Destinations several channels share can indicate common "
+                             "sourcing or coordination.")
+                else:
+                    min_shared = 1
+                color_by = h2.radio("Line color", ["channel", "type"], horizontal=True,
+                                    format_func=lambda v: {"channel": "Source channel",
+                                                           "type": "Referral type"}[v])
+                if min_shared > 1:
+                    breadth = (chosen[~chosen["via"]].groupby("referred_key")
+                               ["referrer_key"].nunique())
+                    keep = set(breadth[breadth >= min_shared].index)
+                    chosen = chosen[chosen["referred_key"].isin(keep)]
+                shown_part = chosen if show_via else chosen[~chosen["via"]]
+                kinds = shown_part["referred_key"].map(key_kind)
+                avail = {k: int(shown_part.loc[kinds == k, "referred_key"].nunique())
+                         for k in KINDS}
+                limits = detail_controls("cmp", [
+                    (("telegram", "out"), ("Telegram channel", "Telegram channels"),
+                     avail["telegram"]),
+                    ("social", ("social media account", "social media accounts"),
+                     avail["social"]),
+                    ("website", ("website", "websites"), avail["website"]),
+                ])
+                svg, height = compare_svg(chosen, picked, weight, limits,
+                                          show_via=show_via, color_by=color_by)
+                st.caption("Left: the channels being compared. Right: the Telegram channels, "
+                           "social media accounts and websites they refer their audience to, "
+                           "most frequent first. Each line runs from one channel to one "
+                           "destination. The colored dots on each destination card show how "
+                           "many referrals came from each channel.")
+                show_svg(svg, height, "compare_channels")
+
+            st.markdown("**Referrals by channel**")
+            all_cols = st.toggle("Include every collected channel in the table",
+                                 value=False, key="compare_all_cols")
+            table_channels = list(made.index) if all_cols else (picked or [])
+            table = compare_table(summary, table_channels, weight, show_via)
+            if table.empty:
+                st.caption("No referrals to show.")
+            else:
+                st.caption(f"One row per destination; one column per channel with the number "
+                           f"of {'posts' if weight == 'posts' else 'views'}. `channels` counts "
+                           "how many of these channels refer to the destination.")
+                st.dataframe(table, width="stretch", hide_index=True)
+                st.download_button(
+                    "Download this table (.xlsx)",
+                    xlsx_bytes(table, sheet="By channel", tall_rows=False),
+                    file_name=f"referrals_by_channel_{date.today():%Y%m%d}.xlsx")
 
     else:
         shown = summary if show_via else direct
