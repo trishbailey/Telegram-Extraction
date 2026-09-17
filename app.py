@@ -24,10 +24,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-import networkx as nx
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import resvg_py
 import streamlit as st
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
@@ -1684,7 +1681,7 @@ def ego_cards(summary, edges, focus, side, weight, limits, show_via):
     part = part.assign(_kind=part[key].map(key_kind))
     for kind in KINDS:
         grp = part[part["_kind"] == kind]
-        n = limits.get(kind, 10)
+        n = limits.get((kind, side), limits.get(kind, 10))
         if grp.empty or n == 0:
             continue
         direct_w = grp[~grp["via"]].groupby(key)[weight].sum()
@@ -1731,7 +1728,7 @@ def card_stats(card, weight):
 
 
 def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
-            show_via=False):
+            show_via=False, hub_note=None):
     left, tin = ego_cards(summary, edges, focus, "in", weight, limits, show_via)
     right, tout = ego_cards(summary, edges, focus, "out", weight, limits, show_via)
     focus_kind = key_kind(focus)
@@ -1740,15 +1737,19 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
     LX, RX, HX = 12, W - 12 - CW, W / 2
     TOP = 112
 
-    def column(sections):
+    is_all = focus == ALL_KEY
+
+    def column(sections, side):
         items = []
         for kind in KINDS:
             if sections[kind]:
-                items.append(("label", KIND_TITLES[kind]))
+                title = ("Collected channels" if is_all and side == "in"
+                         else KIND_TITLES[kind])
+                items.append(("label", title))
                 items += [("card", c) for c in sections[kind]]
         return items
 
-    left_items, right_items = column(left), column(right)
+    left_items, right_items = column(left, "in"), column(right, "out")
 
     def height_of(items):
         return sum(LABEL_H if kind == "label" else CH + GAP for kind, _ in items)
@@ -1783,8 +1784,18 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                 continue
             top, mid = y, y + CH / 2
             y += CH + GAP
-            lines = sorted(c["lines"], key=lambda l: (l["via"], TYPES.index(l["type"]),
-                                                      l["platform"]))
+            if is_all and side == "in":
+                # One line per collected channel, sized by all of its referrals.
+                merged = {}
+                for l in c["lines"]:
+                    m = merged.setdefault(l["via"], {"type": "total", "platform": "",
+                                                     "via": l["via"], "posts": 0, "views": 0})
+                    m["posts"] += l["posts"]
+                    m["views"] += l["views"]
+                lines = sorted(merged.values(), key=lambda l: l["via"])
+            else:
+                lines = sorted(c["lines"], key=lambda l: (l["via"], TYPES.index(l["type"]),
+                                                          l["platform"]))
             widths = [stroke(l[weight]) for l in lines]
             span = sum(widths) + 2 * (len(widths) - 1)
             offset = mid - span / 2
@@ -1794,11 +1805,14 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                 yb = HY + (ya - mid) * 0.35
                 xa, xb = (x0 + CW, HX - R + 4) if side == "in" else (x0, HX + R - 4)
                 xc = (xa + xb) / 2
-                color = line_color(l["type"], l["platform"])
-                used.add((l["type"], l["platform"]))
+                color = (HUB_COLORS["telegram"] if l["type"] == "total"
+                         else line_color(l["type"], l["platform"]))
+                if l["type"] != "total":
+                    used.add((l["type"], l["platform"]))
                 if l["via"]:
                     used.add(("via", ""))
-                what = (platform_name(l["platform"]) + " link" if l["type"] == "social"
+                what = ("referral" if l["type"] == "total"
+                        else platform_name(l["platform"]) + " link" if l["type"] == "social"
                         else TYPE_NAMES[l["type"]])
                 via_note = " inside forwarded posts" if l["via"] else ""
                 tip = (f"{c['label']}: {plural(int(l['posts']), what)}{via_note}, "
@@ -1812,6 +1826,15 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                     f'<title>{escape(tip)}</title></path>')
 
             stats = card_stats(c, weight)
+            if is_all and side == "in":
+                direct_lines = [l for l in c["lines"] if not l["via"]]
+                total = sum(l["posts"] for l in direct_lines)
+                short_stats = (f"{compact(sum(l['views'] for l in direct_lines))} views · "
+                               if weight == "views" else "") + plural(int(total), "referral")
+                tip_stats = stats
+                stats = short_stats
+            else:
+                tip_stats = stats
             if c["other"]:
                 fill = "#EDF0F4"
             else:
@@ -1830,7 +1853,7 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
             badge_x = x0 + CW - 34 if side == "in" else x0 + 34
             text_x = x0 + 16 if side == "in" else x0 + 66
             size = 17 if len(badge_text) == 1 else 13
-            tip = f"{c['label']}\n{stats}"
+            tip = f"{c['label']}\n{tip_stats}"
             cards_svg.append(
                 f'<g><title>{escape(tip)}</title>'
                 f'<rect x="{x0}" y="{top}" width="{CW}" height="{CH}" rx="6" fill="{fill}" '
@@ -1863,14 +1886,14 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
         hub_color = PLATFORMS[key_platform(focus)][2]
     else:
         hub_color = HUB_COLORS[focus_kind]
-    name = fit(focus_label, 2 * R - 20, 14, bold=True)
+    name = "All channels" if is_all else fit(focus_label, 2 * R - 20, 14, bold=True)
     n_hub = len(tin["ids"] | tout["ids"])
     hub = (f'<circle cx="{HX}" cy="{HY}" r="{R + 6}" fill="#FFFFFF" stroke="#D5DBE3"/>'
            f'<circle cx="{HX}" cy="{HY}" r="{R}" fill="{hub_color}"/>'
            f'<text x="{HX}" y="{HY + 2}" font-size="14" font-weight="bold" fill="#FFFFFF" '
            f'text-anchor="middle">{escape(name)}</text>'
            f'<text x="{HX}" y="{HY + 22}" font-size="11.5" fill="#F0F3FA" '
-           f'text-anchor="middle">{escape(plural(n_hub, "post"))}</text>'
+           f'text-anchor="middle">{escape(hub_note or plural(n_hub, "post"))}</text>'
            f'<title>{escape(focus_label)}</title>')
 
     def box(x, y, label, value, align):
@@ -1883,7 +1906,8 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                 f'text-anchor="{align}">{value:,}</text>')
 
     step = BOX_H + BOX_GAP
-    boxes = [box(LX, box_top, "Telegram channels referring", tin["counts"]["telegram"], "end"),
+    boxes = [box(LX, box_top, "Collected channels referring" if is_all
+                 else "Telegram channels referring", tin["counts"]["telegram"], "end"),
              box(LX, box_top + step, "Posts with referrals", tin["posts"], "end")]
     if right_boxes:
         boxes += [
@@ -1921,7 +1945,7 @@ def ego_svg(summary, edges, focus, focus_label, weight, limits, collected=True,
                   else "Line width and order: views")
     headers = (f'<text x="12" y="60" font-size="11.5" fill="#94A0B0">{width_note}</text>'
                f'<text x="{LX}" y="92" font-size="15" font-weight="bold" fill="#2D3748">'
-               f'Incoming referrals</text>'
+               f'{"Channels in the collection" if is_all else "Incoming referrals"}</text>'
                f'<text x="{RX + CW}" y="92" font-size="15" font-weight="bold" fill="#2D3748" '
                f'text-anchor="end">Outgoing referrals</text>')
 
@@ -1937,281 +1961,53 @@ def svg_to_png(svg):
     return bytes(resvg_py.svg_to_bytes(svg_string=svg, zoom=2, background="#ffffff"))
 
 
-# ── All-channels views ──────────────────────────────────────────────
-def build_sankey(nodes, links, weight, height):
-    fig = go.Figure(go.Sankey(
-        arrangement="snap",
-        node=dict(label=[short(n[0]) for n in nodes], color=[n[1] for n in nodes],
-                  pad=12, thickness=16, customdata=[n[0] for n in nodes],
-                  hovertemplate="%{customdata}<br>%{value:,.0f} " + weight + "<extra></extra>"),
-        link=dict(
-            source=[l["source"] for l in links], target=[l["target"] for l in links],
-            value=[l["value"] for l in links],
-            color=[rgba(line_color(l["type"], l["platform"]), 0.5) for l in links],
-            customdata=[[l["what"], l["posts"], l["views"]] for l in links],
-            hovertemplate=("%{source.customdata} → %{target.customdata}<br>"
-                           "%{customdata[0]}: %{customdata[1]:,} posts, "
-                           "%{customdata[2]:,.0f} views<extra></extra>")),
-    ))
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=10, b=10), font_size=12)
-    return fig
+# ── All-collected-channels diagram ──────────────────────────────────
+ALL_KEY = "__all_collected__"
 
 
-def overview_sankey(summary, weight, n_sources, n_targets):
-    """Collected channels on the left, the accounts they refer to on the right."""
-    cols = ["referrer_key", "referrer", "referred_key", "referred", "type", "platform"]
-    agg = summary.groupby(cols, as_index=False)[["posts", "views"]].sum()
-    for key, label, n, noun in (("referred_key", "referred", n_targets, "account"),
-                                ("referrer_key", "referrer", n_sources, "channel")):
-        totals = agg.groupby(key)[weight].sum().sort_values(ascending=False)
-        mask = ~agg[key].isin(set(totals.index[:n]))
-        if mask.any():
-            agg.loc[mask, key] = f"__other_{key}__"
-            agg.loc[mask, label] = other_label(len(totals) - n, noun)
-    agg = agg.groupby(cols, as_index=False)[["posts", "views"]].sum()
-
-    left = agg.groupby(["referrer_key", "referrer"])[weight].sum().sort_values(ascending=False)
-    right = agg.assign(kind_order=agg["referred_key"].map(
-        lambda k: KINDS.index(key_kind(k)) if not k.startswith("__") else 3))
-    right = (right.groupby(["referred_key", "referred", "kind_order"])[weight].sum()
-             .reset_index().sort_values(["kind_order", weight], ascending=[True, False]))
-    nodes = [(lbl, NODE_COLOR) for _, lbl in left.index]
-    li = {k: i for i, (k, _) in enumerate(left.index)}
-    ri = {}
-    for r in right.itertuples(index=False):
-        ri[r.referred_key] = len(nodes)
-        kind = key_kind(r.referred_key)
-        color = (line_color("social", key_platform(r.referred_key)) if kind == "social"
-                 else TYPE_HEX["website"] if kind == "website" else NODE_COLOR)
-        nodes.append((r.referred, color))
-    links = [{"source": li[r.referrer_key], "target": ri[r.referred_key],
-              "value": getattr(r, weight), "type": r.type, "platform": r.platform,
-              "what": (platform_name(r.platform) + " link") if r.type == "social"
-              else TYPE_NAMES[r.type], "posts": r.posts, "views": r.views}
-             for r in agg.itertuples(index=False)]
-    height = max(480, 28 * max(len(li), len(ri)) + 80)
-    return build_sankey(nodes, links, weight, height)
+def collection_view(summary, edges, collected):
+    """Recast referrals so the whole collection is the hub: collected channels on the left,
+    everything they refer to on the right."""
+    part = summary[summary["referrer_key"].isin(collected)]
+    left = part.assign(referred_key=ALL_KEY, referred="All collected channels",
+                       referred_short="All collected channels", referred_kind="telegram")
+    right = part.assign(referrer_key=ALL_KEY, referrer="All collected channels")
+    cols = ["referrer_key", "referrer", "referred_key", "referred", "referred_short",
+            "referred_kind", "type", "platform", "via"]
+    agg = {"posts": ("posts", "sum"), "views": ("views", "sum"),
+           "first_seen": ("first_seen", "min"), "last_seen": ("last_seen", "max"),
+           "example_post": ("example_post", "first")}
+    both = pd.concat([left, right]).groupby(cols, dropna=False).agg(**agg).reset_index()
+    e = edges[edges["referrer_key"].isin(collected)]
+    e_all = pd.concat([e.assign(referred_key=ALL_KEY), e.assign(referrer_key=ALL_KEY)])
+    return both, e_all
 
 
-NODE_SYMBOLS = {"collected": "circle", "telegram": "diamond", "social": "square",
-                "website": "triangle-up"}
-NODE_TYPE_NAMES = {"collected": "Collected channel", "telegram": "Other Telegram account",
-                   "social": "Social media account", "website": "Website"}
-COMMUNITY_COLORS = ["#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD", "#8C564B",
-                    "#E377C2", "#7F7F7F", "#BCBD22", "#17BECF", "#393B79", "#AD494A",
-                    "#637939", "#8C6D31", "#7B4173", "#3182BD"]
-
-
-def build_graph(summary, collected):
-    """Directed, weighted graph of referrals (direct referrals only)."""
-    G = nx.DiGraph()
+def shared_destinations(summary, min_channels=2):
+    """Destinations referred to by several collected channels."""
     direct = summary[~summary["via"]]
-    agg = (direct.groupby(["referrer_key", "referrer", "referred_key", "referred"])
-           .agg(posts=("posts", "sum"), views=("views", "sum"),
-                types=("type", lambda s: ", ".join(sorted(set(s))))).reset_index())
-    for r in agg.itertuples(index=False):
-        for key, label in ((r.referrer_key, r.referrer), (r.referred_key, r.referred)):
-            if key not in G:
-                kind = key_kind(key)
-                node_type = "collected" if key in collected else kind
-                G.add_node(key, label=str(label), node_type=node_type,
-                           platform=key_platform(key) or "")
-        G.add_edge(r.referrer_key, r.referred_key, posts=float(r.posts),
-                   views=float(r.views), types=r.types)
-    return G
-
-
-def graph_metrics(G, weight):
-    if G.number_of_nodes() == 0:
+    if direct.empty:
         return pd.DataFrame()
-    w = {(u, v): max(d[weight], 1e-9) for u, v, d in G.edges(data=True)}
-    nx.set_edge_attributes(G, w, "w")
-    pagerank = nx.pagerank(G, weight="w") if G.number_of_edges() else {}
-    k = None if G.number_of_nodes() <= 1500 else 300
-    betweenness = nx.betweenness_centrality(G, k=k, seed=7) if G.number_of_edges() else {}
-    U = G.to_undirected()
-    communities = {}
-    if U.number_of_edges():
-        for i, members in enumerate(sorted(nx.community.louvain_communities(
-                U, weight="w", seed=7), key=len, reverse=True), start=1):
-            for m in members:
-                communities[m] = i
-    rows = []
-    for n, d in G.nodes(data=True):
-        rows.append({
-            "key": n, "account": d["label"], "node_type": NODE_TYPE_NAMES[d["node_type"]],
-            "platform": platform_name(d["platform"]) if d["platform"] else "",
-            "referred_to_by": G.in_degree(n),
-            "posts_referring_to_it": sum(e["posts"] for _, _, e in G.in_edges(n, data=True)),
-            "refers_to": G.out_degree(n),
-            "posts_referring_out": sum(e["posts"] for _, _, e in G.out_edges(n, data=True)),
-            "views_in": sum(e["views"] for _, _, e in G.in_edges(n, data=True)),
-            "pagerank": round(pagerank.get(n, 0), 6),
-            "betweenness": round(betweenness.get(n, 0), 6),
-            "community": communities.get(n, 0),
-        })
-    return pd.DataFrame(rows).sort_values("pagerank", ascending=False).reset_index(drop=True)
+    g = direct.groupby(["referred_key", "referred"])
+    table = g.agg(collected_channels=("referrer_key", "nunique"),
+                  posts=("posts", "sum"), views=("views", "sum"),
+                  first_seen=("first_seen", "min"), last_seen=("last_seen", "max")).reset_index()
+    names = g["referrer"].agg(lambda s: ", ".join(sorted(set(s)))).rename("referred_to_by")
+    table = table.merge(names.reset_index(), on=["referred_key", "referred"])
 
+    def kind_name(k):
+        kind = key_kind(k)
+        if kind == "social":
+            return platform_name(key_platform(k))
+        return "Website" if kind == "website" else "Telegram"
 
-def filter_graph(G, metrics, min_posts, min_referrers, max_nodes):
-    H = nx.DiGraph()
-    H.add_nodes_from(G.nodes(data=True))
-    H.add_edges_from((u, v, d) for u, v, d in G.edges(data=True) if d["posts"] >= min_posts)
-    if min_referrers > 1:
-        drop = [n for n, d in H.nodes(data=True)
-                if d["node_type"] != "collected" and H.in_degree(n) < min_referrers]
-        H.remove_nodes_from(drop)
-    H.remove_nodes_from([n for n in list(H) if H.degree(n) == 0])
-    if H.number_of_nodes() > max_nodes:
-        score = metrics.set_index("key")["posts_referring_to_it"] + \
-            metrics.set_index("key")["posts_referring_out"]
-        keep = set(score[score.index.isin(H.nodes)].sort_values(ascending=False)
-                   .index[:max_nodes])
-        H.remove_nodes_from([n for n in list(H) if n not in keep])
-        H.remove_nodes_from([n for n in list(H) if H.degree(n) == 0])
-    return H
-
-
-def network_figure(H, metrics, weight, size_by, color_by, n_labels, arrows=True):
-    m = metrics.set_index("key")
-    U = H.to_undirected()
-    for u, v, d in U.edges(data=True):
-        d["lw"] = np.log1p(d[weight])
-    pos = nx.spring_layout(U, weight="lw", seed=7, iterations=150,
-                           k=1.8 / max(sqrt(max(U.number_of_nodes(), 1)), 1))
-    fig = go.Figure()
-
-    wmax = max((d[weight] for _, _, d in H.edges(data=True)), default=1) or 1
-    buckets = {}
-    mids = {"x": [], "y": [], "text": [], "angle": []}
-    for u, v, d in H.edges(data=True):
-        kind = key_kind(v)
-        if d["types"] == "forward":
-            color = TYPE_HEX["forward"]
-        elif kind == "social":
-            color = line_color("social", key_platform(v))
-        elif kind == "website":
-            color = TYPE_HEX["website"]
-        else:
-            color = TYPE_HEX["mention"]
-        width = round(0.6 + 7 * sqrt(d[weight] / wmax), 0)
-        b = buckets.setdefault((color, width), {"x": [], "y": []})
-        (x0, y0), (x1, y1) = pos[u], pos[v]
-        b["x"] += [x0, x1, None]
-        b["y"] += [y0, y1, None]
-        mids["x"].append(x0 + (x1 - x0) * 0.6)
-        mids["y"].append(y0 + (y1 - y0) * 0.6)
-        mids["angle"].append(np.degrees(np.arctan2(x1 - x0, y1 - y0)))
-        mids["text"].append(f"{H.nodes[u]['label']} → {H.nodes[v]['label']}<br>"
-                            f"{int(d['posts']):,} posts ({d['types']}), "
-                            f"{d['views']:,.0f} views")
-    for (color, width), b in buckets.items():
-        fig.add_trace(go.Scatter(x=b["x"], y=b["y"], mode="lines", hoverinfo="skip",
-                                 line=dict(color=rgba(color, 0.45), width=width),
-                                 showlegend=False))
-    fig.add_trace(go.Scatter(
-        x=mids["x"], y=mids["y"], mode="markers",
-        marker=dict(size=9, symbol="arrow", angle=mids["angle"],
-                    color="rgba(70,70,70,0.55)" if arrows else "rgba(0,0,0,0)"),
-        hovertext=mids["text"], hoverinfo="text", showlegend=False))
-
-    size_col = {"Times referred to": "posts_referring_to_it",
-                "Referrals made": "posts_referring_out",
-                "PageRank": "pagerank"}[size_by]
-    smax = max(m[size_col].max(), 1e-9)
-    ranked = m.loc[[n for n in H.nodes]].sort_values("pagerank", ascending=False)
-    labeled = set(ranked.index[:n_labels])
-    for node_type in ("collected", "telegram", "social", "website"):
-        nodes = [n for n, d in H.nodes(data=True) if d["node_type"] == node_type]
-        if not nodes:
-            continue
-        if color_by == "Community":
-            colors = [COMMUNITY_COLORS[(int(m.at[n, "community"]) - 1)
-                                       % len(COMMUNITY_COLORS)]
-                      if m.at[n, "community"] else "#999999" for n in nodes]
-        else:
-            colors = []
-            for n in nodes:
-                d = H.nodes[n]
-                if node_type == "collected":
-                    colors.append("#1F4FD1")
-                elif node_type == "social":
-                    colors.append(line_color("social", d["platform"]))
-                elif node_type == "website":
-                    colors.append(TYPE_HEX["website"])
-                else:
-                    colors.append(TYPE_HEX["mention"])
-        sizes = [9 + 34 * sqrt(max(m.at[n, size_col], 0) / smax) for n in nodes]
-        hover = [f"<b>{m.at[n, 'account']}</b><br>{m.at[n, 'node_type']}"
-                 + (f" ({m.at[n, 'platform']})" if m.at[n, "platform"] else "")
-                 + f"<br>Referred to by {m.at[n, 'referred_to_by']} accounts "
-                 f"({int(m.at[n, 'posts_referring_to_it']):,} posts)"
-                 f"<br>Refers to {m.at[n, 'refers_to']} accounts "
-                 f"({int(m.at[n, 'posts_referring_out']):,} posts)"
-                 f"<br>PageRank {m.at[n, 'pagerank']:.4f} · community {m.at[n, 'community']}"
-                 f"<br><i>Click to open in the one-channel view</i>"
-                 for n in nodes]
-        fig.add_trace(go.Scatter(
-            x=[pos[n][0] for n in nodes], y=[pos[n][1] for n in nodes],
-            mode="markers+text",
-            text=[short(m.at[n, "account"], 28) if n in labeled else "" for n in nodes],
-            textposition="top center", textfont=dict(size=11, color="#2D3748"),
-            marker=dict(size=sizes, color=colors, symbol=NODE_SYMBOLS[node_type],
-                        line=dict(width=1, color="#FFFFFF"), opacity=0.92),
-            customdata=[[n, m.at[n, "account"]] for n in nodes],
-            hovertext=hover, hoverinfo="text", name=NODE_TYPE_NAMES[node_type]))
-    fig.update_layout(
-        height=760, margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="#FFFFFF",
-        paper_bgcolor="#FFFFFF", hovermode="closest", dragmode="pan",
-        legend=dict(orientation="h", y=1.03, x=0),
-        xaxis=dict(visible=False), yaxis=dict(visible=False, scaleanchor="x"))
-    return fig
-
-
-def matrix_figure(summary, metrics, weight, n_cols):
-    direct = summary[~summary["via"]]
-    mat = direct.pivot_table(index=["referrer_key", "referrer"],
-                             columns=["referred_key", "referred"],
-                             values=weight, aggfunc="sum", fill_value=0)
-    if mat.empty:
-        return None
-    breadth = (mat > 0).sum(axis=0)
-    volume = mat.sum(axis=0)
-    cols = (pd.DataFrame({"b": breadth, "v": volume})
-            .sort_values(["b", "v"], ascending=False).index[:n_cols])
-    mat = mat[cols]
-    mat = mat[mat.sum(axis=1) > 0]
-    comm = metrics.set_index("key")["community"] if not metrics.empty else pd.Series(dtype=int)
-    rows = sorted(mat.index, key=lambda r: (comm.get(r[0], 0), -mat.loc[r].sum()))
-    cols = sorted(mat.columns, key=lambda c: (comm.get(c[0], 0), -mat[c].sum()))
-    mat = mat.loc[rows, cols]
-    z = mat.values
-    hover = [[f"{r[1]} → {c[1]}<br>{z[i][j]:,.0f} {weight}" for j, c in enumerate(cols)]
-             for i, r in enumerate(rows)]
-    fig = go.Figure(go.Heatmap(
-        z=np.sqrt(z), x=[short(c[1], 30) for c in cols], y=[short(r[1], 30) for r in rows],
-        text=hover, hoverinfo="text", colorscale="Blues", showscale=False, xgap=1, ygap=1))
-    fig.update_layout(height=max(360, 24 * len(rows) + 220),
-                      margin=dict(l=10, r=10, t=10, b=10),
-                      xaxis=dict(tickangle=-50, side="top"),
-                      yaxis=dict(autorange="reversed"), plot_bgcolor="#FFFFFF")
-    return fig
-
-
-def graph_file(G, fmt):
-    H = nx.DiGraph()
-    for n, d in G.nodes(data=True):
-        H.add_node(n, **{k: (v if isinstance(v, (int, float, str)) else str(v))
-                         for k, v in d.items()})
-    for u, v, d in G.edges(data=True):
-        H.add_edge(u, v, weight=d["posts"], posts=d["posts"], views=d["views"],
-                   types=d["types"])
-    buf = io.BytesIO()
-    if fmt == "gexf":
-        nx.write_gexf(H, buf)
-    else:
-        nx.write_graphml(H, buf)
-    return buf.getvalue()
+    table["type"] = table["referred_key"].map(kind_name)
+    table = table[table["collected_channels"] >= min_channels]
+    table = table.rename(columns={"referred": "destination"})
+    return (table[["destination", "type", "collected_channels", "referred_to_by", "posts",
+                   "views", "first_seen", "last_seen"]]
+            .sort_values(["collected_channels", "posts"], ascending=False)
+            .reset_index(drop=True))
 
 
 TELEGRAM_APPS_URL = "https://my.telegram.org/auth?to=apps"
@@ -2716,18 +2512,69 @@ def collector_page():
             with tabs[7]:
                 st.code("\n".join(ss.results["log"]))
 
-MAP_VIEWS = ["One channel", "Network", "Sankey", "Matrix"]
+TOP_CHOICES = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100, "All"]
 
 
-def open_node_from_network():
-    state = st.session_state.get("net_chart") or {}
-    points = (state.get("selection") or {}).get("points") or []
-    for point in points:
-        data = point.get("customdata")
-        if isinstance(data, (list, tuple)) and len(data) == 2:
-            st.session_state["focus_choice"] = (data[0], data[1])
-            st.session_state["map_view"] = "One channel"
-            return
+def section_counts(summary, focus, show_via):
+    """How many cards each section of a diagram could show."""
+    part = summary if show_via else summary[~summary["via"]]
+    inc = part[part["referred_key"] == focus]
+    out = part[part["referrer_key"] == focus]
+    kinds = out["referred_key"].map(key_kind)
+    return (int(inc["referrer_key"].nunique()),
+            {k: int(out.loc[kinds == k, "referred_key"].nunique()) for k in KINDS})
+
+
+def detail_controls(prefix, sections):
+    """A 'Show top' control for every section, with optional per-section sliders.
+
+    sections: (limit key, (singular, plural) label, number available) tuples.
+    Returns the limits dict.
+    """
+    c1, c2 = st.columns([3, 1])
+    top = c1.select_slider(
+        "Show top", TOP_CHOICES, value=10, key=f"{prefix}_top",
+        help="How many cards each section shows, starting with the most frequent. "
+             "Everything beyond this is combined into an Other card. Choose All to "
+             "show every account.")
+    separate = c2.toggle("Set each section separately", key=f"{prefix}_separate")
+    limits = {}
+    if separate:
+        cols = st.columns(len(sections))
+        for col, (key, (one, many), available) in zip(cols, sections):
+            label = many[:1].upper() + many[1:]
+            if available == 0:
+                limits[key] = 0
+                col.caption(f"{label}: none")
+                continue
+            default = available if top == "All" else min(top, available)
+            limits[key] = col.slider(f"{label} (of {available:,})", 0, available, default,
+                                     key=f"{prefix}_{key}")
+    else:
+        for key, _, available in sections:
+            limits[key] = available if top == "All" else top
+    shown = []
+    for key, (one, many), available in sections:
+        if not available:
+            continue
+        n = min(limits[key], available)
+        if n < available:
+            shown.append(f"{n:,} of {available:,} {many}")
+        elif available == 1:
+            shown.append(f"the only {one}")
+        else:
+            shown.append(f"all {available:,} {many}")
+    if shown:
+        st.caption("Showing " + "; ".join(shown) + ". Each section is sorted from most to "
+                   "least frequent.")
+    cards = sum(min(limits[k], a) for k, _, a in sections)
+    if cards > 150:
+        st.caption(f"This diagram has about {cards:,} cards, so it is long. Scroll within it, "
+                   "or lower **Show top** for a shorter view.")
+    return limits
+
+
+MAP_VIEWS = ["All collected channels", "One channel"]
 
 
 def referral_page():
@@ -2831,8 +2678,7 @@ def referral_page():
         "Show references inside forwarded posts (dashed lines)", value=False,
         help="When a channel forwards a post, the accounts and links inside that post "
              "belong to the original author. Turn this on to see them as faint dashed "
-             "lines from the forwarding channel. They are left out of totals, the network "
-             "and the matrix.")
+             "lines from the forwarding channel. They are left out of the totals.")
 
     edges = edges[edges["type"].isin(types)]
     summary = summarize_edges(edges)
@@ -2842,25 +2688,78 @@ def referral_page():
     direct = summary[~summary["via"]]
     collected = set(posts["channel"].map(handle_key))
     n_sources = direct["referrer_key"].nunique()
-    n_targets = direct["referred_key"].nunique()
 
-    if n_sources <= 1:
-        suggested = "One channel"
-    elif n_sources <= 8 and n_targets <= 30:
-        suggested = "Sankey"
-    else:
-        suggested = "Network"
     if "map_view" not in st.session_state:
-        st.session_state["map_view"] = suggested
-    view = st.radio("View", MAP_VIEWS, key="map_view", horizontal=True)
-    st.caption(f"{plural(n_sources, 'collected channel')} referring to "
-               f"{plural(n_targets, 'account')} and website"
-               f"{'' if n_targets == 1 else 's'}. Suggested view for data this size: "
-               f"**{suggested}**. One channel suits any size; Sankey stays readable up to "
-               "about 8 channels and 30 destinations; Network and Matrix handle larger sets.")
-    png = {"toImageButtonOptions": {"format": "png", "scale": 2, "filename": "referral_map"}}
+        st.session_state["map_view"] = ("All collected channels" if n_sources > 1
+                                        else "One channel")
+    view = st.radio("View", MAP_VIEWS, key="map_view", horizontal=True,
+                    help="All collected channels shows the whole collection at once. "
+                         "One channel shows who refers to a single channel, account or "
+                         "website, and where a channel sends its audience.")
 
-    if view == "One channel":
+    def show_svg(svg, height, stem):
+        size_attr = 'width="1100" height="%d"' % round(height)
+        responsive = svg.replace(size_attr, 'width="100%"', 1)
+        # All text inside the SVG is escaped with html.escape before it reaches the page.
+        st.iframe('<div style="max-width:1100px;margin:0 auto">' + responsive + "</div>",
+                  height="content")
+        d1, d2, _ = st.columns([1, 1, 2])
+        d1.download_button("Download diagram (.png)", svg_to_png(svg),
+                           file_name=f"referrals_{stem}.png", mime="image/png")
+        d2.download_button("Download diagram (.svg)", svg.encode("utf-8"),
+                           file_name=f"referrals_{stem}.svg", mime="image/svg+xml")
+        st.caption("Hover over a card or line for exact counts. Within each section, the "
+                   "most frequent partner is at the top. Links that do not name an account "
+                   "are grouped per platform below the identified accounts. The SVG file "
+                   "scales cleanly in PowerPoint and Word.")
+
+    if view == "All collected channels":
+        if n_sources == 0:
+            st.info("None of the collected channels refer to other accounts in these posts.")
+        else:
+            if n_sources > 1:
+                min_shared = st.slider(
+                    "Only destinations shared by at least this many collected channels",
+                    1, n_sources, 1,
+                    help="Destinations several channels share can indicate common sourcing "
+                         "or coordination. Leave at 1 to include everything.")
+            else:
+                min_shared = 1
+            view_summary = summary
+            if min_shared > 1:
+                breadth = direct.groupby("referred_key")["referrer_key"].nunique()
+                keep = set(breadth[breadth >= min_shared].index)
+                view_summary = summary[summary["referred_key"].isin(keep)]
+            hub_preview, _ = collection_view(view_summary, edges, collected)
+            n_in, n_out = section_counts(hub_preview, ALL_KEY, show_via)
+            limits = detail_controls("all", [
+                (("telegram", "in"), ("collected channel", "collected channels"), n_in),
+                (("telegram", "out"), ("Telegram channel referred to",
+                                       "Telegram channels referred to"), n_out["telegram"]),
+                ("social", ("social media account", "social media accounts"), n_out["social"]),
+                ("website", ("website", "websites"), n_out["website"]),
+            ])
+            hub_summary, hub_edges = collection_view(view_summary, edges, collected)
+            hub_edges = hub_edges[hub_edges["referred_key"].isin(
+                set(hub_summary["referred_key"]))]
+            note = plural(n_sources, "channel")
+            svg, height = ego_svg(hub_summary, hub_edges, ALL_KEY, "All collected channels",
+                                  weight, limits, collected=True, show_via=show_via,
+                                  hub_note=note)
+            st.caption("Left: the collected channels, sorted by how many referrals each "
+                       "makes. Right: every Telegram channel, social media account and "
+                       "website they refer their audience to, sorted by how often. A "
+                       "collected channel that other collected channels refer to appears on "
+                       "both sides.")
+            show_svg(svg, height, "all_collected_channels")
+            shared = shared_destinations(summary, max(min_shared, 2))
+            st.markdown("**Destinations shared by two or more collected channels**")
+            if shared.empty:
+                st.caption("No destination is referred to by more than one collected channel.")
+            else:
+                st.dataframe(shared, width="stretch", hide_index=True)
+
+    else:
         shown = summary if show_via else direct
         totals = pd.concat([
             shown.groupby(["referrer_key", "referrer"])["posts"].sum()
@@ -2878,111 +2777,27 @@ def referral_page():
             "Channel, account or website", options, key="focus_choice",
             format_func=lambda kl: f"{kl[1]}  ({totals[kl]:,} referrals"
                                    f"{', collected' if kl[0] in collected else ''})")
-        g1, g2, g3 = st.columns(3)
-        limits = {
-            "telegram": g1.slider("Telegram channels shown per side", 3, 30, 10),
-            "social": g2.slider("Social media accounts shown", 0, 30, 8,
-                                help="Set to 0 to hide social media accounts."),
-            "website": g3.slider("Websites shown", 0, 30, 5,
-                                 help="Set to 0 to hide websites."),
-        }
         focus, focus_label = choice
+        n_in, n_out = section_counts(summary, focus, show_via)
+        limits = detail_controls("one", [
+            (("telegram", "in"), ("channel referring to it", "channels referring to it"),
+             n_in),
+            (("telegram", "out"), ("Telegram channel it refers to",
+                                   "Telegram channels it refers to"), n_out["telegram"]),
+            ("social", ("social media account", "social media accounts"), n_out["social"]),
+            ("website", ("website", "websites"), n_out["website"]),
+        ])
         svg, height = ego_svg(summary, edges, focus, focus_label, weight, limits,
                               collected=focus in collected, show_via=show_via)
-        size_attr = 'width="1100" height="%d"' % round(height)
-        responsive = svg.replace(size_attr, 'width="100%"', 1)
-        # All text inside the SVG is escaped with html.escape before it reaches the page.
-        st.iframe('<div style="max-width:1100px;margin:0 auto">' + responsive + "</div>",
-                  height="content")
         stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", focus_label.lstrip("@")) or "channel"
-        d1, d2, _ = st.columns([1, 1, 2])
-        d1.download_button("Download diagram (.png)", svg_to_png(svg),
-                           file_name=f"referrals_{stem}.png", mime="image/png")
-        d2.download_button("Download diagram (.svg)", svg.encode("utf-8"),
-                           file_name=f"referrals_{stem}.svg", mime="image/svg+xml")
-        st.caption("Hover over a card or line for exact counts. Within each section, the "
-                   "most frequent partner is at the top. Links that do not name an account "
-                   "are grouped per platform below the identified accounts. The SVG file "
-                   "scales cleanly in PowerPoint and Word.")
-        inc = counterparty_table(summary if show_via else direct, "referred_key",
-                                 "referrer_key", "referrer", focus)
-        out = counterparty_table(summary if show_via else direct, "referrer_key",
-                                 "referred_key", "referred", focus)
+        show_svg(svg, height, stem)
+        inc = counterparty_table(shown, "referred_key", "referrer_key", "referrer", focus)
+        out = counterparty_table(shown, "referrer_key", "referred_key", "referred", focus)
         t1, t2 = st.columns(2)
         t1.markdown(f"**Incoming to {focus_label}**")
         t1.dataframe(inc, width="stretch", hide_index=True)
         t2.markdown(f"**Outgoing from {focus_label}**")
         t2.dataframe(out, width="stretch", hide_index=True)
-
-    elif view == "Network":
-        G = build_graph(summary, collected)
-        metrics = graph_metrics(G, weight)
-        big = G.number_of_nodes() > 150
-        n1, n2, n3 = st.columns(3)
-        min_posts = n1.slider("Minimum posts per link", 1, 20, 1)
-        min_refs = n2.slider(
-            "Only destinations referred to by at least this many collected channels",
-            1, 10, 2 if big else 1,
-            help="Destinations shared by several channels often indicate common sourcing "
-                 "or coordination.")
-        max_nodes = n3.slider("Maximum nodes", 20, 600, 150, step=10)
-        n4, n5, n6, n7 = st.columns(4)
-        size_by = n4.selectbox("Node size", ["Times referred to", "Referrals made",
-                                             "PageRank"])
-        color_by = n5.selectbox("Node color", ["Type and platform", "Community"])
-        n_labels = n6.slider("Labeled nodes", 0, 80, 20)
-        arrows = n7.checkbox("Direction arrows", value=True)
-        H = filter_graph(G, metrics, min_posts, min_refs, max_nodes)
-        if H.number_of_nodes() == 0:
-            st.warning("No links remain with these settings. Lower the minimums.")
-        else:
-            with st.spinner("Laying out the network..."):
-                fig = network_figure(H, metrics, weight, size_by, color_by, n_labels, arrows)
-            st.caption(f"Showing {H.number_of_nodes():,} of {G.number_of_nodes():,} nodes and "
-                       f"{H.number_of_edges():,} of {G.number_of_edges():,} links. Circles are "
-                       "collected channels, diamonds other Telegram accounts, squares social "
-                       "media accounts and triangles websites. Scroll to zoom, drag to pan, "
-                       "click a node to open it in the one-channel view.")
-            st.plotly_chart(fig, width="stretch", config=png, key="net_chart",
-                            on_select=open_node_from_network, selection_mode="points")
-        st.markdown("**Node metrics**")
-        st.caption("PageRank: overall prominence from being referred to by prominent "
-                   "accounts. Betweenness: how often an account sits on the shortest path "
-                   "between others, marking bridges between clusters. Community: clusters "
-                   "found with the Louvain method.")
-        st.dataframe(metrics.drop(columns=["key"]), width="stretch", hide_index=True)
-        x1, x2, x3 = st.columns(3)
-        x1.download_button("Node metrics (.xlsx)",
-                           xlsx_bytes(metrics.drop(columns=["key"]), sheet="Nodes",
-                                      tall_rows=False),
-                           file_name=f"network_nodes_{date.today():%Y%m%d}.xlsx")
-        x2.download_button("Network for Gephi (.gexf)", graph_file(G, "gexf"),
-                           file_name=f"referral_network_{date.today():%Y%m%d}.gexf")
-        x3.download_button("Network as GraphML (.graphml)", graph_file(G, "graphml"),
-                           file_name=f"referral_network_{date.today():%Y%m%d}.graphml")
-
-    elif view == "Sankey":
-        a1, a2 = st.columns(2)
-        n_src = a1.slider("Collected channels shown", 3, 50, 20)
-        n_tgt = a2.slider("Destinations shown", 5, 80, 30)
-        st.caption("Left: collected channels. Right: Telegram accounts, then social media "
-                   "accounts, then websites. References inside forwarded posts are not "
-                   "included. Hover and click the camera icon to save an image.")
-        st.plotly_chart(overview_sankey(direct, weight, n_src, n_tgt),
-                        width="stretch", config=png)
-
-    else:
-        if n_sources < 2:
-            st.info("The matrix compares collected channels, so it needs at least two.")
-        else:
-            n_cols = st.slider("Destinations shown", 10, 120, 40)
-            metrics = graph_metrics(build_graph(summary, collected), weight)
-            fig = matrix_figure(summary, metrics, weight, n_cols)
-            st.caption("Rows: collected channels. Columns: the destinations referred to by "
-                       "the most collected channels. Darker cells mean more referrals. Rows "
-                       "and columns are grouped by network community, so channels that "
-                       "share sources form solid blocks.")
-            st.plotly_chart(fig, width="stretch", config=png)
 
     table = (summary.rename(columns={"referrer": "from_channel", "referred": "to_account",
                                      "referred_kind": "destination_type"})

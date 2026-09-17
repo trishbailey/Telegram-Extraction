@@ -1,6 +1,6 @@
 # Telegram Channel Collector
 
-A web app for collecting posts from public Telegram channels with Boolean queries and mapping how those channels refer their audiences to one another. Each user signs in with their own Telegram account and API credentials, enters target channels, a query and a date range, and downloads the results as an Excel file. Each post row includes forwarding sources, Telegram mentions, social media accounts, linked websites and cross-channel reposting (cascades). A second page maps referrals: which accounts send audiences to a channel and where that channel sends its own audience, as a single-channel diagram, a network, a Sankey diagram or a matrix.
+A web app for collecting posts from public Telegram channels with Boolean queries and mapping how those channels refer their audiences to one another. Each user signs in with their own Telegram account and API credentials, enters target channels, a query and a date range, and downloads the results as an Excel file. Each post row includes forwarding sources, Telegram mentions, social media accounts, linked websites and cross-channel reposting (cascades). A second page maps referrals as labeled hub-and-spoke diagrams: where a whole collection of channels sends its audience, and who sends audiences to any single channel.
 
 Multiple users can run collections at the same time. Every browser session keeps its own Telegram connection, settings and results in memory. Nothing is written to the server's disk.
 
@@ -205,7 +205,7 @@ A referral is a post that points its audience somewhere else.
 
 A mention is the channel's own writing: a citation, recommendation, cross-promotion, advertisement or attack. A forward carries the original author's words unchanged, with provenance. A channel that copies another's text without forwarding or naming it creates neither; the cascade columns catch that.
 
-**Forwards.** A forward counts only as a referral to its source. The accounts and links inside the forwarded post belong to the original author, so they are not credited to the forwarding channel. **Show references inside forwarded posts** adds them to the single-channel diagram as faint dashed lines and to the counterparty tables as a `via_forwards` column. They never count toward totals, the network or the matrix.
+**Forwards.** A forward counts only as a referral to its source. The accounts and links inside the forwarded post belong to the original author, so they are not credited to the forwarding channel. **Show references inside forwarded posts** adds them to the diagrams as faint dashed lines and to the counterparty tables as a `via_forwards` column. They never count toward the totals.
 
 **Counting rules.**
 
@@ -223,45 +223,44 @@ A mention is the channel's own writing: a citation, recommendation, cross-promot
 
 ### Views
 
-The page suggests a view for the size of the data. Single-channel data opens in **One channel**. Up to about 8 collected channels and 30 destinations opens in **Sankey**. Anything larger opens in **Network**. Any view can be chosen at any time.
+Both views use the same design: labeled cards on each side, curved lines whose thickness shows volume, and a hub in the center. Every card shows its name, so the diagrams stay readable at any size.
+
+**All collected channels.** The default when the data covers more than one channel.
+
+- **Hub:** the whole collection.
+- **Left:** the collected channels, each with one line sized by the number of referrals it makes. Cards are sorted from most to fewest.
+- **Right:** where the collection sends its audience, in three sections: Telegram channels, social media accounts and websites. Each section is sorted from most to least referred, and lines are colored by referral type and platform.
+- **Both sides:** a collected channel that other collected channels refer to appears on both sides.
+- **Controls:**
+  - **Show top** (see [Detail level](#detail-level))
+  - **Only destinations shared by at least this many collected channels:** keeps only destinations that several collected channels refer to, which can point to common sourcing or coordination
+- **Shared destinations table:** below the diagram, every destination referred to by two or more collected channels, with the number of channels, their names, posts, views, and first and last dates.
 
 **One channel.** Pick a channel, social media account or website. It sits in the center.
 
 - **Left:** the channels that refer their audience to it.
-- **Right:** where it refers its audience, in three sections: Telegram channels, social media accounts, and websites.
-- **Order:** within each section, the most frequent partner is at the top and the rest follow in descending order. Accounts that could not be identified follow the identified ones, and an "Other" card collects anything beyond the display limit.
-- **Cards and lines:** social media cards show a platform badge (YT, X, VK, TT and so on) and the platform name. Line thickness follows the selected measure. Hover over a card or line for exact figures.
+- **Right:** where it refers its audience, in the same three sections.
+- **Order:** within each section, the most frequent partner is at the top. Accounts that could not be identified follow the identified ones, and an "Other" card collects anything beyond the display limit.
+- **Cards:** social media cards show a platform badge (YT, X, VK, TT and so on) and the platform name. Hover over a card or line for exact figures.
 - **Totals and tables:** totals count distinct channels, identified social media accounts, websites and posts. Tables below the diagram list every counterparty with counts by type, views, first and last dates, and an example post link.
 
 A website, a social media account or an uncollected channel shows incoming referrals only, and the diagram says why.
 
-**Network.** A directed network of every referral.
+### Detail level
 
-- **Nodes:** circles are collected channels, diamonds other Telegram accounts, squares social media accounts and triangles websites.
-- **Size and color:** node size shows how often an account is referred to, how many referrals it makes, or its PageRank. Color shows the node type and platform, or the detected community.
-- **Links:** thickness follows the selected measure, and arrows show direction.
-- **Clutter controls:**
-  - a minimum number of posts per link
-  - a limit to destinations shared by at least a set number of collected channels, which often indicates common sourcing or coordination (defaults to 2 when the network has more than 150 nodes)
-  - a maximum node count
-  - the number of labeled nodes
-- **Interaction:** scroll to zoom and drag to pan. Clicking a node opens it in the One channel view.
-- **Metrics:** the node metrics table lists, for every account:
-  - how many accounts refer to it and how many it refers to, with post counts
-  - PageRank, which measures prominence from being referred to by prominent accounts
-  - betweenness, which marks accounts that bridge otherwise separate clusters
-  - community, from Louvain clustering
+Every section of both views is sorted by prevalence: the channel, account or website with the most referrals is at the top, and the rest follow in descending order. The sort follows **Line width and order**, so it ranks by number of posts or by views. Accounts that could not be identified follow the identified ones.
 
-**Sankey.** Collected channels on the left, and on the right the Telegram accounts, social media accounts and websites they refer to. Best for small collections.
+**Show top** sets how many cards each section shows: 5, 10, 15, 20, 25, 30, 40, 50, 75, 100 or **All**. Everything beyond the limit is combined into an "Other" card at the bottom of its section, so the totals stay complete. Use a low setting to see only the heaviest sources and destinations, and **All** to see every account.
 
-**Matrix.** Collected channels as rows and the most widely referenced destinations as columns. Darker cells mean more referrals. Rows and columns are grouped by network community, so channels that share sources form solid blocks. Needs at least two collected channels.
+**Set each section separately** replaces the single control with one slider per section, each running from 0 to the number of accounts available. Set a section to 0 to hide it.
+
+A line under the controls reports what is shown, for example "10 of 36 Telegram channels referred to; all 5 websites". Diagrams with more than 150 cards are long; the app notes this so you can lower **Show top** or scroll.
 
 ### Exports
 
-- **One channel:** the diagram as PNG or SVG. The SVG scales cleanly in PowerPoint and Word.
-- **Network, Sankey and Matrix:** hover over the chart and click the camera icon to save a PNG.
-- **Network:** node metrics as `.xlsx`, and the full network as `.gexf` for Gephi or `.graphml` for yEd and other graph tools.
-- **All views:** **Download referral table (.xlsx)** saves one row per channel pair, referral type and platform, with a column marking references inside forwarded posts.
+- **Diagrams:** both views download as PNG or SVG. The SVG scales cleanly in PowerPoint and Word.
+- **Referral table (.xlsx):** one row per channel pair, referral type and platform, with a column marking references inside forwarded posts.
+- **Tables:** the shared destinations and counterparty tables can be downloaded from the table toolbar (hover over a table).
 
 ### Coverage
 
